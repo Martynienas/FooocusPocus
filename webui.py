@@ -176,6 +176,12 @@ with shared.gradio_root:
                     if isinstance(default_prompt, str) and default_prompt != '':
                         shared.gradio_root.load(lambda: default_prompt, outputs=prompt)
 
+                    # Move negative prompt next to the positive prompt for easier access
+                    negative_prompt = gr.Textbox(label='Negative Prompt', show_label=True, placeholder="Type prompt here.",
+                                                 info='Describing what you do not want to see.', lines=2,
+                                                 elem_id='negative_prompt',
+                                                 value=modules.config.default_prompt_negative)
+
                 with gr.Column(scale=3, min_width=0):
                     generate_button = gr.Button(label="Generate", value="Generate", elem_classes='type_row', elem_id='generate_button', visible=True)
                     reset_button = gr.Button(label="Reconnect", value="Reconnect", elem_classes='type_row', elem_id='reset_button', visible=False)
@@ -584,10 +590,7 @@ with shared.gradio_root:
                                          choices=flags.OutputFormat.list(),
                                          value=modules.config.default_output_format)
 
-                negative_prompt = gr.Textbox(label='Negative Prompt', show_label=True, placeholder="Type prompt here.",
-                                             info='Describing what you do not want to see.', lines=2,
-                                             elem_id='negative_prompt',
-                                             value=modules.config.default_prompt_negative)
+                # negative_prompt moved to main prompt area under the positive prompt
                 seed_random = gr.Checkbox(label='Random', value=True)
                 image_seed = gr.Textbox(label='Seed', value=0, max_lines=1, visible=False) # workaround for https://github.com/gradio-app/gradio/issues/5354
 
