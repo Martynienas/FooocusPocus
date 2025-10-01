@@ -74,6 +74,13 @@ progress::after {
     text-align: right;
     width: 215px;
 }
+
+/* Main container width */
+.gradio-container {
+    max-width: 98% !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
+}
 div:has(> #positive_prompt) {
     border: none;
 }
