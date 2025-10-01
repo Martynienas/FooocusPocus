@@ -3,6 +3,7 @@ import args_manager
 import modules.config
 import json
 import urllib.parse
+from datetime import datetime
 
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
@@ -19,6 +20,42 @@ def get_current_html_path(output_format=None):
                                                                          extension=output_format)
     html_name = os.path.join(os.path.dirname(local_temp_filename), 'log.html')
     return html_name
+
+
+def get_latest_html_path():
+    """Find the most recent log.html file in the outputs folder"""
+    outputs_path = modules.config.path_outputs
+    
+    if not os.path.exists(outputs_path):
+        return None
+    
+    # Get all date folders in outputs directory
+    date_folders = []
+    try:
+        for item in os.listdir(outputs_path):
+            item_path = os.path.join(outputs_path, item)
+            if os.path.isdir(item_path):
+                # Check if this looks like a date folder (YYYY-MM-DD format)
+                try:
+                    # Try to parse as date to validate format
+                    datetime.strptime(item, "%Y-%m-%d")
+                    
+                    # Check if log.html exists in this folder
+                    log_path = os.path.join(item_path, 'log.html')
+                    if os.path.exists(log_path):
+                        date_folders.append((item, log_path))
+                except ValueError:
+                    # Not a valid date folder, skip
+                    continue
+    except OSError:
+        return None
+    
+    if not date_folders:
+        return None
+    
+    # Sort by date (newest first) and return the most recent log.html path
+    date_folders.sort(key=lambda x: x[0], reverse=True)
+    return date_folders[0][1]
 
 
 def log(img, metadata, metadata_parser: MetadataParser | None = None, output_format=None, task=None, persist_image=True) -> str:

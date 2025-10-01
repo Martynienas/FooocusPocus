@@ -19,7 +19,7 @@ import launch
 from extras.inpaint_mask import SAMOptions
 
 from modules.sdxl_styles import legal_style_names
-from modules.private_logger import get_current_html_path
+from modules.private_logger import get_current_html_path, get_latest_html_path
 from modules.ui_gradio_extensions import reload_javascript
 from modules.auth import auth_enabled, check_auth
 from modules.util import is_json
@@ -619,7 +619,13 @@ with shared.gradio_root:
                     if args_manager.args.disable_image_log:
                         return gr.update(value='')
 
-                    return gr.update(value=f'<a href="file={get_current_html_path(output_format)}" target="_blank">\U0001F4DA History Log</a>')
+                    # Try to find the latest log file first
+                    latest_log_path = get_latest_html_path()
+                    if latest_log_path:
+                        return gr.update(value=f'<a href="file={latest_log_path}" target="_blank">\U0001F4DA History Log</a>')
+                    else:
+                        # Fallback to current date path (for new installations or when no logs exist yet)
+                        return gr.update(value=f'<a href="file={get_current_html_path(output_format)}" target="_blank">\U0001F4DA History Log</a>')
 
                 history_link = gr.HTML()
                 shared.gradio_root.load(update_history_link, outputs=history_link, queue=False, show_progress=False)
