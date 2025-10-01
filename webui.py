@@ -19,7 +19,7 @@ import launch
 from extras.inpaint_mask import SAMOptions
 
 from modules.sdxl_styles import legal_style_names
-from modules.private_logger import get_current_html_path, get_latest_html_path
+from modules.private_logger import get_current_html_path, get_latest_html_path, navigate_log_date, get_all_log_dates, get_html_path_by_date
 from modules.ui_gradio_extensions import reload_javascript
 from modules.auth import auth_enabled, check_auth
 from modules.util import is_json
@@ -615,20 +615,64 @@ with shared.gradio_root:
                 seed_random.change(random_checked, inputs=[seed_random], outputs=[image_seed],
                                    queue=False, show_progress=False)
 
-                def update_history_link():
+                # History log navigation
+                current_log_date = gr.State(value=None)
+                
+                def update_history_link(current_date=None):
                     if args_manager.args.disable_image_log:
-                        return gr.update(value='')
-
-                    # Try to find the latest log file first
-                    latest_log_path = get_latest_html_path()
-                    if latest_log_path:
-                        return gr.update(value=f'<a href="file={latest_log_path}" target="_blank">\U0001F4DA History Log</a>')
-                    else:
-                        # Fallback to current date path (for new installations or when no logs exist yet)
-                        return gr.update(value=f'<a href="file={get_current_html_path(output_format)}" target="_blank">\U0001F4DA History Log</a>')
-
-                history_link = gr.HTML()
-                shared.gradio_root.load(update_history_link, outputs=history_link, queue=False, show_progress=False)
+                        return gr.update(value=''), gr.update(visible=False), gr.update(visible=False), None
+                    
+                    dates = get_all_log_dates()
+                    if not dates:
+                        # No logs available, show current date path
+                        return (gr.update(value=f'<a href="file={get_current_html_path(output_format)}" target="_blank">\U0001F4DA History Log</a>'),
+                                gr.update(visible=False), gr.update(visible=False), None)
+                    
+                    # Use provided date or latest available
+                    if current_date is None or current_date not in dates:
+                        current_date = dates[0]  # Latest date
+                    
+                    log_path = get_latest_html_path() if current_date == dates[0] else get_html_path_by_date(current_date)
+                    
+                    # Check if navigation buttons should be enabled
+                    current_index = dates.index(current_date) if current_date in dates else 0
+                    can_go_prev = current_index < len(dates) - 1  # Can go to older
+                    can_go_next = current_index > 0  # Can go to newer
+                    
+                    history_text = f'<a href="file={log_path}" target="_blank">\U0001F4DA History Log ({current_date})</a>'
+                    
+                    return (gr.update(value=history_text),
+                            gr.update(visible=True, interactive=can_go_prev),
+                            gr.update(visible=True, interactive=can_go_next),
+                            current_date)
+                
+                def navigate_prev(current_date):
+                    new_date, log_path = navigate_log_date(current_date, 'prev')
+                    if new_date:
+                        return update_history_link(new_date)
+                    return update_history_link(current_date)
+                
+                def navigate_next(current_date):
+                    new_date, log_path = navigate_log_date(current_date, 'next')
+                    if new_date:
+                        return update_history_link(new_date)
+                    return update_history_link(current_date)
+                
+                with gr.Row():
+                    history_prev_btn = gr.Button(value="<<", size="sm", visible=False, scale=0, min_width=40)
+                    history_link = gr.HTML()
+                    history_next_btn = gr.Button(value=">>", size="sm", visible=False, scale=0, min_width=40)
+                
+                # Set up event handlers
+                shared.gradio_root.load(update_history_link, outputs=[history_link, history_prev_btn, history_next_btn, current_log_date], queue=False, show_progress=False)
+                
+                history_prev_btn.click(navigate_prev, inputs=[current_log_date], 
+                                     outputs=[history_link, history_prev_btn, history_next_btn, current_log_date], 
+                                     queue=False, show_progress=False)
+                
+                history_next_btn.click(navigate_next, inputs=[current_log_date], 
+                                     outputs=[history_link, history_prev_btn, history_next_btn, current_log_date], 
+                                     queue=False, show_progress=False)
 
             with gr.Tab(label='Styles', elem_classes=['style_selections_tab']):
                 style_sorter.try_load_sorted_styles(

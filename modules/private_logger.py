@@ -22,14 +22,13 @@ def get_current_html_path(output_format=None):
     return html_name
 
 
-def get_latest_html_path():
-    """Find the most recent log.html file in the outputs folder"""
+def get_all_log_dates():
+    """Get all available log dates sorted from newest to oldest"""
     outputs_path = modules.config.path_outputs
     
     if not os.path.exists(outputs_path):
-        return None
+        return []
     
-    # Get all date folders in outputs directory
     date_folders = []
     try:
         for item in os.listdir(outputs_path):
@@ -43,19 +42,77 @@ def get_latest_html_path():
                     # Check if log.html exists in this folder
                     log_path = os.path.join(item_path, 'log.html')
                     if os.path.exists(log_path):
-                        date_folders.append((item, log_path))
+                        date_folders.append(item)
                 except ValueError:
                     # Not a valid date folder, skip
                     continue
     except OSError:
+        return []
+    
+    # Sort by date (newest first)
+    date_folders.sort(reverse=True)
+    return date_folders
+
+
+def get_latest_html_path():
+    """Find the most recent log.html file in the outputs folder"""
+    dates = get_all_log_dates()
+    if not dates:
         return None
     
-    if not date_folders:
+    latest_date = dates[0]
+    return os.path.join(modules.config.path_outputs, latest_date, 'log.html')
+
+
+def get_html_path_by_date(date_string):
+    """Get log.html path for a specific date"""
+    if not date_string:
         return None
     
-    # Sort by date (newest first) and return the most recent log.html path
-    date_folders.sort(key=lambda x: x[0], reverse=True)
-    return date_folders[0][1]
+    log_path = os.path.join(modules.config.path_outputs, date_string, 'log.html')
+    if os.path.exists(log_path):
+        return log_path
+    return None
+
+
+def navigate_log_date(current_date, direction):
+    """Navigate to previous or next log date
+    Args:
+        current_date: Current date string (YYYY-MM-DD) or None
+        direction: 'prev' for older, 'next' for newer
+    Returns:
+        tuple: (new_date_string, log_path) or (None, None) if no navigation possible
+    """
+    dates = get_all_log_dates()
+    if not dates:
+        return None, None
+    
+    if current_date is None:
+        # If no current date, return the latest
+        latest_date = dates[0]
+        return latest_date, get_html_path_by_date(latest_date)
+    
+    try:
+        current_index = dates.index(current_date)
+    except ValueError:
+        # Current date not found, return latest
+        latest_date = dates[0]
+        return latest_date, get_html_path_by_date(latest_date)
+    
+    if direction == 'prev':
+        # Go to older date (higher index)
+        new_index = current_index + 1
+        if new_index < len(dates):
+            new_date = dates[new_index]
+            return new_date, get_html_path_by_date(new_date)
+    elif direction == 'next':
+        # Go to newer date (lower index)
+        new_index = current_index - 1
+        if new_index >= 0:
+            new_date = dates[new_index]
+            return new_date, get_html_path_by_date(new_date)
+    
+    return None, None
 
 
 def log(img, metadata, metadata_parser: MetadataParser | None = None, output_format=None, task=None, persist_image=True) -> str:
