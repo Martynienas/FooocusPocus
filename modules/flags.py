@@ -134,6 +134,7 @@ class PerformanceLoRA(Enum):
     EXTREME_SPEED = 'sdxl_lcm_lora.safetensors'
     LIGHTNING = 'sdxl_lightning_4step_lora.safetensors'
     HYPER_SD = 'sdxl_hyper_sd_4step_lora.safetensors'
+    CUSTOM = None
 
 
 class Steps(IntEnum):
@@ -142,6 +143,7 @@ class Steps(IntEnum):
     EXTREME_SPEED = 8
     LIGHTNING = 4
     HYPER_SD = 4
+    CUSTOM = 25
 
     @classmethod
     def keys(cls) -> list:
@@ -154,6 +156,7 @@ class StepsUOV(IntEnum):
     EXTREME_SPEED = 8
     LIGHTNING = 4
     HYPER_SD = 4
+    CUSTOM = 20
 
 
 class Performance(Enum):
@@ -162,6 +165,7 @@ class Performance(Enum):
     EXTREME_SPEED = 'Extreme Speed'
     LIGHTNING = 'Lightning'
     HYPER_SD = 'Hyper-SD'
+    CUSTOM = 'Custom'
 
     @classmethod
     def list(cls) -> list:
@@ -181,10 +185,14 @@ class Performance(Enum):
             x = x.value
         return x in [cls.EXTREME_SPEED.value, cls.LIGHTNING.value, cls.HYPER_SD.value]
 
-    def steps(self) -> int | None:
+    def steps(self, custom_steps: int = None) -> int | None:
+        if self.name == 'CUSTOM' and custom_steps is not None:
+            return custom_steps
         return Steps[self.name].value if self.name in Steps.__members__ else None
 
-    def steps_uov(self) -> int | None:
+    def steps_uov(self, custom_steps_uov: int = None) -> int | None:
+        if self.name == 'CUSTOM' and custom_steps_uov is not None:
+            return custom_steps_uov
         return StepsUOV[self.name].value if self.name in StepsUOV.__members__ else None
 
     def lora_filename(self) -> str | None:

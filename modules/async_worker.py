@@ -32,7 +32,14 @@ class AsyncTask:
         self.style_selections = args.pop()
 
         self.performance_selection = Performance(args.pop())
-        self.steps = self.performance_selection.steps()
+        self.custom_steps = args.pop()
+        self.custom_steps_uov = args.pop()
+        
+        # Use custom steps if performance is CUSTOM, otherwise use default
+        if self.performance_selection == Performance.CUSTOM:
+            self.steps = self.custom_steps
+        else:
+            self.steps = self.performance_selection.steps()
         self.original_steps = self.steps
 
         self.aspect_ratios_selection = args.pop()
@@ -943,7 +950,10 @@ def worker():
                 skip_prompt_processing = True
                 steps = 0
             else:
-                steps = performance.steps_uov()
+                if performance == Performance.CUSTOM:
+                    steps = async_task.custom_steps_uov
+                else:
+                    steps = performance.steps_uov()
 
             if advance_progress:
                 current_progress += 1
@@ -1229,12 +1239,18 @@ def worker():
         all_steps = steps * async_task.image_number
 
         if async_task.enhance_checkbox and async_task.enhance_uov_method != flags.disabled.casefold():
-            enhance_upscale_steps = async_task.performance_selection.steps()
+            if async_task.performance_selection == Performance.CUSTOM:
+                enhance_upscale_steps = async_task.custom_steps
+            else:
+                enhance_upscale_steps = async_task.performance_selection.steps()
             if 'upscale' in async_task.enhance_uov_method:
                 if 'fast' in async_task.enhance_uov_method:
                     enhance_upscale_steps = 0
                 else:
-                    enhance_upscale_steps = async_task.performance_selection.steps_uov()
+                    if async_task.performance_selection == Performance.CUSTOM:
+                        enhance_upscale_steps = async_task.custom_steps_uov
+                    else:
+                        enhance_upscale_steps = async_task.performance_selection.steps_uov()
             enhance_upscale_steps, _, _, _ = apply_overrides(async_task, enhance_upscale_steps, height, width)
             enhance_upscale_steps_total = async_task.image_number * enhance_upscale_steps
             all_steps += enhance_upscale_steps_total
