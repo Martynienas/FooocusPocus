@@ -416,3 +416,24 @@ div:has(> #positive_prompt) {
 #inpaint_brush_color input[type=color]{
   background: none;
 }
+/* Full
+ width layout styles */
+.gradio-container {
+    max-width: 99% !important;
+    width: 99% !important;
+    margin: 0 auto !important;
+}
+
+.full-width-row {
+    width: 100% !important;
+}
+
+.full-width-row > * {
+    flex-grow: 1 !important;
+}
+
+/* Ensure main content uses full available space */
+.main_view, .final_gallery {
+    width: 100% !important;
+    max-width: 100% !important;
+}

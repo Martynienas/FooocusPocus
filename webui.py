@@ -150,14 +150,44 @@ title = f'Fooocus {fooocus_version.version}'
 if isinstance(args_manager.args.preset, str):
     title += ' ' + args_manager.args.preset
 
-shared.gradio_root = gr.Blocks(title=title).queue()
+shared.gradio_root = gr.Blocks(title=title, css="""
+.gradio-container {
+    max-width: 99% !important;
+    width: 99% !important;
+    margin: 0 auto !important;
+}
+.full-width-row {
+    width: 100% !important;
+}
+
+/* Ensure main content uses full available space */
+.main_view, .final_gallery {
+    width: 100% !important;
+    max-width: 100% !important;
+}
+/* Make sure the interface expands when advanced panel is hidden */
+.gradio-container .block {
+    width: 100% !important;
+}
+/* Use CSS Grid for precise column control */
+.full-width-row {
+    display: grid !important;
+    grid-template-columns: 25% 50% 25% !important;
+    width: 100% !important;
+    gap: 10px !important;
+}
+/* When advanced panel is hidden, adjust grid */
+.full-width-row:has(.right-panel[style*="display: none"]) {
+    grid-template-columns: 25% 75% !important;
+}
+""").queue()
 
 with shared.gradio_root:
     currentTask = gr.State(worker.AsyncTask(args=[]))
     inpaint_engine_state = gr.State('empty')
-    with gr.Row():
-        # Left panel for prompts
-        with gr.Column(scale=1, min_width=300):
+    with gr.Row(elem_classes=['full-width-row']):
+        # Left panel for prompts (25%)
+        with gr.Column(scale=1, min_width=300, elem_classes=['left-panel']):
             gr.HTML("<h3>Prompts</h3>")
             prompt = gr.Textbox(show_label=False, placeholder="Type prompt here or paste parameters.", elem_id='positive_prompt',
                                 autofocus=True, lines=3)
@@ -171,8 +201,8 @@ with shared.gradio_root:
                                          elem_id='negative_prompt',
                                          value=modules.config.default_prompt_negative)
         
-        # Center panel for gallery and controls
-        with gr.Column(scale=2):
+        # Center panel for gallery and controls (50%)
+        with gr.Column(scale=4, elem_classes=['center-panel']):
             with gr.Row():
                 progress_window = grh.Image(label='Preview', show_label=True, visible=False, height=768,
                                             elem_classes=['main_view'])
@@ -563,7 +593,8 @@ with shared.gradio_root:
             enhance_checkbox.change(lambda x: gr.update(visible=x), inputs=enhance_checkbox,
                                         outputs=enhance_input_panel, queue=False, show_progress=False, _js=switch_js)
 
-        with gr.Column(scale=1, visible=modules.config.default_advanced_checkbox) as advanced_column:
+        # Right panel for advanced settings (25%)
+        with gr.Column(scale=1, visible=modules.config.default_advanced_checkbox, elem_classes=['right-panel']) as advanced_column:
             with gr.Tab(label='Settings'):
                 if not args_manager.args.disable_preset_selection:
                     preset_selection = gr.Dropdown(label='Preset',
