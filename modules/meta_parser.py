@@ -9,7 +9,7 @@ from PIL import Image
 import fooocus_version
 import modules.config
 import modules.sdxl_styles
-from modules.flags import MetadataScheme, Performance, Steps
+from modules.flags import MetadataScheme
 from modules.flags import SAMPLERS, CIVITAI_NO_KARRAS
 from modules.hash_cache import sha256_from_cache
 from modules.util import quote, unquote, extract_styles_from_prompt, is_json, get_file_from_folder_list
@@ -31,8 +31,9 @@ def load_parameter_button_click(raw_metadata: dict | str, is_generating: bool, i
     get_str('prompt', 'Prompt', loaded_parameter_dict, results)
     get_str('negative_prompt', 'Negative Prompt', loaded_parameter_dict, results)
     get_list('styles', 'Styles', loaded_parameter_dict, results)
-    performance = get_str('performance', 'Performance', loaded_parameter_dict, results)
     get_steps('steps', 'Steps', loaded_parameter_dict, results)
+    get_steps('upscale_steps', 'Upscale Steps', loaded_parameter_dict, results)
+    get_number('overwrite_step', 'Overwrite Step', loaded_parameter_dict, results)
     get_number('overwrite_switch', 'Overwrite Switch', loaded_parameter_dict, results)
     get_resolution('resolution', 'Resolution', loaded_parameter_dict, results)
     get_number('guidance_scale', 'Guidance Scale', loaded_parameter_dict, results)
@@ -60,14 +61,8 @@ def load_parameter_button_click(raw_metadata: dict | str, is_generating: bool, i
 
     get_freeu('freeu', 'FreeU', loaded_parameter_dict, results)
 
-    # prevent performance LoRAs to be added twice, by performance and by lora
-    performance_filename = None
-    if performance is not None and performance in Performance.values():
-        performance = Performance(performance)
-        performance_filename = performance.lora_filename()
-
     for i in range(modules.config.default_max_lora_number):
-        get_lora(f'lora_combined_{i + 1}', f'LoRA {i + 1}', loaded_parameter_dict, results, performance_filename)
+        get_lora(f'lora_combined_{i + 1}', f'LoRA {i + 1}', loaded_parameter_dict, results, None)
 
     return results
 
@@ -119,15 +114,14 @@ def get_steps(key: str, fallback: str | None, source_dict: dict, results: list, 
         h = source_dict.get(key, source_dict.get(fallback, default))
         assert h is not None
         h = int(h)
-        # if not in steps or in steps and performance is not the same
-        performance_name = source_dict.get('performance', '').replace(' ', '_').replace('-', '_').casefold()
-        performance_candidates = [key for key in Steps.keys() if key.casefold() == performance_name and Steps[key] == h]
-        if len(performance_candidates) == 0:
-            results.append(h)
-            return
-        results.append(-1)
+        results.append(h)
     except:
-        results.append(-1)
+        if key == 'steps':
+            results.append(modules.config.default_steps)
+        elif key == 'upscale_steps':
+            results.append(modules.config.default_upscale_steps)
+        else:
+            results.append(-1)
 
 
 def get_resolution(key: str, fallback: str | None, source_dict: dict, results: list, default=None):
@@ -233,9 +227,6 @@ def get_lora(key: str, fallback: str | None, source_dict: dict, results: list, p
             name = split_data[1]
             weight = split_data[2]
 
-        if name == performance_filename:
-            raise Exception
-
         weight = float(weight)
         results.append(enabled)
         results.append(name)
@@ -337,8 +328,9 @@ class A1111MetadataParser(MetadataParser):
         'raw_negative_prompt': 'Raw negative prompt',
         'negative_prompt': 'Negative prompt',
         'styles': 'Styles',
-        'performance': 'Performance',
         'steps': 'Steps',
+        'upscale_steps': 'Upscale Steps',
+        'overwrite_step': 'Overwrite Step',
         'sampler': 'Sampler',
         'scheduler': 'Scheduler',
         'vae': 'VAE',
@@ -415,12 +407,7 @@ class A1111MetadataParser(MetadataParser):
 
         data['styles'] = str(found_styles)
 
-        # try to load performance based on steps, fallback for direct A1111 imports
-        if 'steps' in data and 'performance' in data is None:
-            try:
-                data['performance'] = Performance.by_steps(data['steps']).value
-            except ValueError | KeyError:
-                pass
+
 
         if 'sampler' in data:
             data['sampler'] = data['sampler'].replace(' Karras', '')
@@ -480,7 +467,8 @@ class A1111MetadataParser(MetadataParser):
             self.fooocus_to_a1111['base_model']: Path(data['base_model']).stem,
             self.fooocus_to_a1111['base_model_hash']: self.base_model_hash,
 
-            self.fooocus_to_a1111['performance']: data['performance'],
+            self.fooocus_to_a1111['steps']: data['steps'],
+            self.fooocus_to_a1111['upscale_steps']: data.get('upscale_steps', 20),
             self.fooocus_to_a1111['scheduler']: scheduler,
             self.fooocus_to_a1111['vae']: Path(data['vae']).stem,
             # workaround for multiline prompts

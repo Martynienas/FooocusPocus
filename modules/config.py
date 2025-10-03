@@ -10,7 +10,7 @@ import modules.sdxl_styles
 
 from modules.model_loader import load_file_from_url
 from modules.extra_utils import makedirs_with_log, get_files_from_folder, try_eval_env_var
-from modules.flags import OutputFormat, Performance, MetadataScheme
+from modules.flags import OutputFormat, MetadataScheme
 
 
 def get_config_path(key, default_value):
@@ -397,11 +397,17 @@ default_prompt = get_config_item_or_set_default(
     disable_empty_as_none=True,
     expected_type=str
 )
-default_performance = get_config_item_or_set_default(
-    key='default_performance',
-    default_value=Performance.SPEED.value,
-    validator=lambda x: x in Performance.values(),
-    expected_type=str
+default_steps = get_config_item_or_set_default(
+    key='default_steps',
+    default_value=25,
+    validator=lambda x: isinstance(x, int) and 1 <= x <= 200,
+    expected_type=int
+)
+default_upscale_steps = get_config_item_or_set_default(
+    key='default_upscale_steps',
+    default_value=20,
+    validator=lambda x: isinstance(x, int) and 1 <= x <= 200,
+    expected_type=int
 )
 default_image_prompt_checkbox = get_config_item_or_set_default(
     key='default_image_prompt_checkbox',
@@ -736,9 +742,10 @@ possible_preset_keys = {
     "default_clip_skip": "clip_skip",
     "default_sampler": "sampler",
     "default_scheduler": "scheduler",
-    "default_overwrite_step": "steps",
+    "default_overwrite_step": "overwrite_step",
     "default_overwrite_switch": "overwrite_switch",
-    "default_performance": "performance",
+    "default_steps": "steps",
+    "default_upscale_steps": "upscale_steps",
     "default_image_number": "image_number",
     "default_prompt": "prompt",
     "default_prompt_negative": "negative_prompt",

@@ -578,10 +578,11 @@ with shared.gradio_root:
                                                    value=args_manager.args.preset if args_manager.args.preset else "initial",
                                                    interactive=True)
 
-                performance_selection = gr.Radio(label='Performance',
-                                                 choices=flags.Performance.values(),
-                                                 value=modules.config.default_performance,
-                                                 elem_classes=['performance_selection'])
+                with gr.Row():
+                    steps_slider = gr.Slider(label='Steps', minimum=1, maximum=200, step=1, value=modules.config.default_steps,
+                                           info='Number of sampling steps for image generation')
+                    upscale_steps_slider = gr.Slider(label='Upscale Steps', minimum=1, maximum=200, step=1, value=modules.config.default_upscale_steps,
+                                                   info='Number of steps for upscaling operations')
 
                 with gr.Accordion(label='Aspect Ratios', open=False, elem_id='aspect_ratios_accordion') as aspect_ratios_accordion:
                     aspect_ratios_selection = gr.Radio(label='Aspect Ratios', show_label=False,
@@ -766,7 +767,7 @@ with shared.gradio_root:
                                                       interactive=not modules.config.default_black_out_nsfw,
                                                       info='Disable preview during generation.')
                         disable_intermediate_results = gr.Checkbox(label='Disable Intermediate Results',
-                                                      value=flags.Performance.has_restricted_features(modules.config.default_performance),
+                                                      value=False,
                                                       info='Disable intermediate results during generation, only show final gallery.')
 
                         disable_seed_increment = gr.Checkbox(label='Disable seed increment',
@@ -901,7 +902,7 @@ with shared.gradio_root:
         state_is_generating = gr.State(False)
 
         load_data_outputs = [advanced_checkbox, image_number, prompt, negative_prompt, style_selections,
-                             performance_selection, overwrite_step, overwrite_switch, aspect_ratios_selection,
+                             steps_slider, upscale_steps_slider, overwrite_step, overwrite_switch, aspect_ratios_selection,
                              overwrite_width, overwrite_height, guidance_scale, sharpness, adm_scaler_positive,
                              adm_scaler_negative, adm_scaler_end, refiner_swap_method, adaptive_cfg, clip_skip,
                              base_model, refiner_model, refiner_switch, sampler_name, scheduler_name, vae_name,
@@ -949,15 +950,7 @@ with shared.gradio_root:
                 .then(lambda: None, _js='()=>{refresh_style_localization();}') \
                 .then(inpaint_engine_state_change, inputs=[inpaint_engine_state] + enhance_inpaint_mode_ctrls, outputs=enhance_inpaint_engine_ctrls, queue=False, show_progress=False)
 
-        performance_selection.change(lambda x: [gr.update(interactive=not flags.Performance.has_restricted_features(x))] * 11 +
-                                               [gr.update(visible=not flags.Performance.has_restricted_features(x))] * 1 +
-                                               [gr.update(value=flags.Performance.has_restricted_features(x))] * 1,
-                                     inputs=performance_selection,
-                                     outputs=[
-                                         guidance_scale, sharpness, adm_scaler_end, adm_scaler_positive,
-                                         adm_scaler_negative, refiner_switch, refiner_model, sampler_name,
-                                         scheduler_name, adaptive_cfg, refiner_swap_method, negative_prompt, disable_intermediate_results
-                                     ], queue=False, show_progress=False)
+
 
         output_format.input(lambda x: gr.update(output_format=x), inputs=output_format)
 
@@ -989,7 +982,7 @@ with shared.gradio_root:
         ctrls = [currentTask, generate_image_grid]
         ctrls += [
             prompt, negative_prompt, style_selections,
-            performance_selection, aspect_ratios_selection, image_number, output_format, image_seed,
+            steps_slider, upscale_steps_slider, aspect_ratios_selection, image_number, output_format, image_seed,
             read_wildcards_in_order, sharpness, guidance_scale
         ]
 

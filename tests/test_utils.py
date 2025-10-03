@@ -131,7 +131,6 @@ class TestUtils(unittest.TestCase):
 
         for test in test_cases:
             prompt, loras, loras_limit, skip_file_check, performance = test["input"]
-            lora_filenames = modules.util.remove_performance_lora(lora_filenames, performance)
             expected = test["output"]
             actual = util.parse_lora_references_from_prompt(prompt, loras, loras_limit=loras_limit, lora_filenames=lora_filenames)
             self.assertEqual(expected, actual)
