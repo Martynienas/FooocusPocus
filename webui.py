@@ -156,6 +156,22 @@ with shared.gradio_root:
     currentTask = gr.State(worker.AsyncTask(args=[]))
     inpaint_engine_state = gr.State('empty')
     with gr.Row():
+        # Left panel for prompts
+        with gr.Column(scale=1, min_width=300):
+            gr.HTML("<h3>Prompts</h3>")
+            prompt = gr.Textbox(show_label=False, placeholder="Type prompt here or paste parameters.", elem_id='positive_prompt',
+                                autofocus=True, lines=3)
+
+            default_prompt = modules.config.default_prompt
+            if isinstance(default_prompt, str) and default_prompt != '':
+                shared.gradio_root.load(lambda: default_prompt, outputs=prompt)
+
+            negative_prompt = gr.Textbox(label='Negative Prompt', show_label=True, placeholder="Type prompt here.",
+                                         info='Describing what you do not want to see.', lines=2,
+                                         elem_id='negative_prompt',
+                                         value=modules.config.default_prompt_negative)
+        
+        # Center panel for gallery and controls
         with gr.Column(scale=2):
             with gr.Row():
                 progress_window = grh.Image(label='Preview', show_label=True, visible=False, height=768,
@@ -168,20 +184,6 @@ with shared.gradio_root:
                                  elem_classes=['resizable_area', 'main_view', 'final_gallery', 'image_gallery'],
                                  elem_id='final_gallery')
             with gr.Row():
-                with gr.Column(scale=17):
-                    prompt = gr.Textbox(show_label=False, placeholder="Type prompt here or paste parameters.", elem_id='positive_prompt',
-                                        autofocus=True, lines=3)
-
-                    default_prompt = modules.config.default_prompt
-                    if isinstance(default_prompt, str) and default_prompt != '':
-                        shared.gradio_root.load(lambda: default_prompt, outputs=prompt)
-
-                    # Move negative prompt next to the positive prompt for easier access
-                    negative_prompt = gr.Textbox(label='Negative Prompt', show_label=True, placeholder="Type prompt here.",
-                                                 info='Describing what you do not want to see.', lines=2,
-                                                 elem_id='negative_prompt',
-                                                 value=modules.config.default_prompt_negative)
-
                 with gr.Column(scale=3, min_width=0):
                     generate_button = gr.Button(label="Generate", value="Generate", elem_classes='type_row', elem_id='generate_button', visible=True)
                     reset_button = gr.Button(label="Reconnect", value="Reconnect", elem_classes='type_row', elem_id='reset_button', visible=False)

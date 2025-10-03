@@ -417,7 +417,7 @@ default_enhance_checkbox = get_config_item_or_set_default(
 )
 default_advanced_checkbox = get_config_item_or_set_default(
     key='default_advanced_checkbox',
-    default_value=False,
+    default_value=True,
     validator=lambda x: isinstance(x, bool),
     expected_type=bool
 )
