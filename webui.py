@@ -169,6 +169,41 @@ with shared.gradio_root:
             negative_prompt = gr.Textbox(label='Negative Prompt', show_label=True, placeholder="Describing what you do not want to see.",
                                          lines=3, elem_id='negative_prompt', container=False,
                                          value=modules.config.default_prompt_negative)
+            
+            # Generate button
+            generate_button = gr.Button(label="Generate", value="Generate", elem_classes='type_row', elem_id='generate_button', visible=True)
+            
+            # Control buttons row
+            with gr.Row():
+                reset_button = gr.Button(label="Reconnect", value="Reconnect", elem_classes='type_row', elem_id='reset_button', visible=False)
+                load_parameter_button = gr.Button(label="Load Parameters", value="Load Parameters", elem_classes='type_row', elem_id='load_parameter_button', visible=False)
+            
+            with gr.Row():
+                skip_button = gr.Button(label="Skip", value="Skip", elem_classes='type_row_half', elem_id='skip_button', visible=False)
+                stop_button = gr.Button(label="Stop", value="Stop", elem_classes='type_row_half', elem_id='stop_button', visible=False)
+
+            def stop_clicked(currentTask):
+                import ldm_patched.modules.model_management as model_management
+                currentTask.last_stop = 'stop'
+                if (currentTask.processing):
+                    model_management.interrupt_current_processing()
+                return currentTask
+
+            def skip_clicked(currentTask):
+                import ldm_patched.modules.model_management as model_management
+                currentTask.last_stop = 'skip'
+                if (currentTask.processing):
+                    model_management.interrupt_current_processing()
+                return currentTask
+
+            stop_button.click(stop_clicked, inputs=currentTask, outputs=currentTask, queue=False, show_progress=False, _js='cancelGenerateForever')
+            skip_button.click(skip_clicked, inputs=currentTask, outputs=currentTask, queue=False, show_progress=False)
+            
+            # Control checkboxes
+            with gr.Row(elem_classes='advanced_check_row'):
+                input_image_checkbox = gr.Checkbox(label='Input Image', value=modules.config.default_image_prompt_checkbox, container=False, elem_classes='min_check')
+                enhance_checkbox = gr.Checkbox(label='Enhance', value=modules.config.default_enhance_checkbox, container=False, elem_classes='min_check')
+                advanced_checkbox = gr.Checkbox(label='Advanced', value=modules.config.default_advanced_checkbox, container=False, elem_classes='min_check')
         
         # Center panel for gallery and controls
         with gr.Column(scale=2):
@@ -182,34 +217,7 @@ with shared.gradio_root:
             gallery = gr.Gallery(label='Gallery', show_label=False, object_fit='contain', visible=True, height=768,
                                  elem_classes=['resizable_area', 'main_view', 'final_gallery', 'image_gallery'],
                                  elem_id='final_gallery')
-            with gr.Row():
-                with gr.Column(scale=3, min_width=0):
-                    generate_button = gr.Button(label="Generate", value="Generate", elem_classes='type_row', elem_id='generate_button', visible=True)
-                    reset_button = gr.Button(label="Reconnect", value="Reconnect", elem_classes='type_row', elem_id='reset_button', visible=False)
-                    load_parameter_button = gr.Button(label="Load Parameters", value="Load Parameters", elem_classes='type_row', elem_id='load_parameter_button', visible=False)
-                    skip_button = gr.Button(label="Skip", value="Skip", elem_classes='type_row_half', elem_id='skip_button', visible=False)
-                    stop_button = gr.Button(label="Stop", value="Stop", elem_classes='type_row_half', elem_id='stop_button', visible=False)
 
-                    def stop_clicked(currentTask):
-                        import ldm_patched.modules.model_management as model_management
-                        currentTask.last_stop = 'stop'
-                        if (currentTask.processing):
-                            model_management.interrupt_current_processing()
-                        return currentTask
-
-                    def skip_clicked(currentTask):
-                        import ldm_patched.modules.model_management as model_management
-                        currentTask.last_stop = 'skip'
-                        if (currentTask.processing):
-                            model_management.interrupt_current_processing()
-                        return currentTask
-
-                    stop_button.click(stop_clicked, inputs=currentTask, outputs=currentTask, queue=False, show_progress=False, _js='cancelGenerateForever')
-                    skip_button.click(skip_clicked, inputs=currentTask, outputs=currentTask, queue=False, show_progress=False)
-            with gr.Row(elem_classes='advanced_check_row'):
-                input_image_checkbox = gr.Checkbox(label='Input Image', value=modules.config.default_image_prompt_checkbox, container=False, elem_classes='min_check')
-                enhance_checkbox = gr.Checkbox(label='Enhance', value=modules.config.default_enhance_checkbox, container=False, elem_classes='min_check')
-                advanced_checkbox = gr.Checkbox(label='Advanced', value=modules.config.default_advanced_checkbox, container=False, elem_classes='min_check')
             with gr.Row(visible=modules.config.default_image_prompt_checkbox) as image_input_panel:
                 with gr.Tabs(selected=modules.config.default_selected_image_input_tab_id):
                     with gr.Tab(label='Upscale or Variation', id='uov_tab') as uov_tab:
