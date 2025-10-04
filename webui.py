@@ -157,7 +157,7 @@ with shared.gradio_root:
     inpaint_engine_state = gr.State('empty')
     with gr.Row():
         # Left panel for prompts
-        with gr.Column(scale=1, min_width=300):
+        with gr.Column(scale=2, min_width=300):
             gr.HTML("<h3>Prompts</h3>")
             prompt = gr.Textbox(label='Positive Prompt', show_label=True, placeholder="Type prompt here or paste parameters.", 
                                 elem_id='positive_prompt', autofocus=True, lines=3, container=False)
@@ -206,7 +206,7 @@ with shared.gradio_root:
                 advanced_checkbox = gr.Checkbox(label='Advanced', value=modules.config.default_advanced_checkbox, container=False, elem_classes='min_check')
         
         # Center panel for gallery and controls
-        with gr.Column(scale=2):
+        with gr.Column(scale=3):
             with gr.Row():
                 progress_window = grh.Image(label='Preview', show_label=True, visible=False, height=768,
                                             elem_classes=['main_view'])
@@ -570,7 +570,7 @@ with shared.gradio_root:
             enhance_checkbox.change(lambda x: gr.update(visible=x), inputs=enhance_checkbox,
                                         outputs=enhance_input_panel, queue=False, show_progress=False, _js=switch_js)
 
-        with gr.Column(scale=1, visible=modules.config.default_advanced_checkbox) as advanced_column:
+        with gr.Column(scale=2, visible=modules.config.default_advanced_checkbox) as advanced_column:
             with gr.Tab(label='Settings'):
                 if not args_manager.args.disable_preset_selection:
                     preset_selection = gr.Dropdown(label='Preset',
