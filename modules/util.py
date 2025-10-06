@@ -492,6 +492,87 @@ def apply_wildcards(wildcard_text, rng, i, read_wildcards_in_order) -> str:
     return wildcard_text
 
 
+def apply_dynamic_prompts(text, rng) -> str:
+    """
+    Apply dynamic prompt multiple selection syntax.
+    Supports:
+    - {option1|option2|option3} - single random choice
+    - {2$$option1|option2|option3} - select 2 random options
+    - {1-3$$option1|option2|option3} - select 1-3 random options
+    """
+    import re
+    
+    original_text = text
+    
+    # Check if there are any dynamic prompts to process
+    if not (re.search(r'\{[^}]*\|[^}]*\}', text) or re.search(r'\{\d+(?:-\d+)?\$\$[^}]*\}', text)):
+        return text
+    
+    # Process multiple selection syntax first: {count$$options}
+    multi_pattern = r'\{(\d+(?:-\d+)?)\$\$(.*?)\}'
+    
+    def replace_multi_choice(match):
+        count_str = match.group(1)
+        options_str = match.group(2)
+        
+        # Parse options
+        options = [opt.strip() for opt in options_str.split('|') if opt.strip()]
+        if not options:
+            return match.group(0)  # Return original if no valid options
+        
+        # Parse count (could be single number or range)
+        if '-' in count_str:
+            try:
+                min_count, max_count = map(int, count_str.split('-'))
+                if min_count > max_count:
+                    min_count, max_count = max_count, min_count  # Swap if reversed
+                if min_count < 0:
+                    min_count = 0
+                if max_count < 0:
+                    max_count = 0
+                count = rng.randint(min_count, max_count) if max_count > min_count else min_count
+            except (ValueError, IndexError):
+                count = 1  # Default to 1 if parsing fails
+        else:
+            try:
+                count = int(count_str)
+                if count < 0:
+                    count = 1  # Default to 1 for negative counts
+            except ValueError:
+                count = 1  # Default to 1 if parsing fails
+        
+        # Ensure count doesn't exceed available options
+        count = min(count, len(options))
+        
+        # Select unique random options
+        selected = rng.sample(options, count)
+        
+        # Join with comma and space
+        return ', '.join(selected)
+    
+    # Apply multiple selection replacements
+    text = re.sub(multi_pattern, replace_multi_choice, text)
+    
+    # Process single choice syntax: {option1|option2|option3}
+    single_pattern = r'\{([^}]*\|[^}]*)\}'
+    
+    def replace_single_choice(match):
+        options_str = match.group(1)
+        options = [opt.strip() for opt in options_str.split('|') if opt.strip()]
+        if not options:
+            return match.group(0)  # Return original if no valid options
+        return rng.choice(options)
+    
+    # Apply single choice replacements
+    text = re.sub(single_pattern, replace_single_choice, text)
+    
+    # Log the processing if text changed
+    if text != original_text:
+        print(f'[Dynamic Prompts] {original_text} -> {text}')
+    
+    return text
+
+
 def get_image_size_info(image: np.ndarray, aspect_ratios: list) -> str:
     try:
         image = Image.fromarray(np.uint8(image))

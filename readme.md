@@ -408,6 +408,27 @@ You can also disable randomness and process a wildcard file from top to bottom b
 
 Wildcards can be nested and combined, and multiple wildcards can be used in the same prompt (example see `wildcards/color_flower.txt`).
 
+### Dynamic Prompts
+
+Example prompts: 
+- `{red|blue|green} flower` - selects one random color
+- `{2$$red|blue|green} flower` - selects 2 random colors  
+- `{1-3$$red|blue|green} flower` - selects 1-3 random colors
+
+Processed for positive and negative prompt.
+
+Supports multiple random selections per prompt using the Dynamic Prompts syntax:
+
+| Syntax | Meaning | Example Result |
+|--------|---------|----------------|
+| `{red|blue|green}` | Select 1 random option | `red flower` |
+| `{2$$red|blue|green}` | Select 2 random options | `blue, green flower` |
+| `{1-3$$red|blue|green}` | Select 1-3 random options | `red, blue flower` |
+
+Selected options are joined with commas and spaces. The randomness is based on the seed, ensuring reproducible results.
+
+Multiple dynamic prompt expressions can be used in the same prompt and will be processed independently.
+
 ### Array Processing
 
 Example prompt: `[[red, green, blue]] flower`
