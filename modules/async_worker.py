@@ -196,7 +196,7 @@ def worker():
     from extras.expansion import safe_str
     from modules.util import (remove_empty_str, HWC3, resize_image, get_image_shape_ceil, set_image_shape_ceil,
                               get_shape_ceil, resample_image, erode_or_dilate, parse_lora_references_from_prompt,
-                              apply_wildcards)
+                              apply_wildcards, apply_dynamic_prompts)
     from modules.upscaler import perform_upscale
 
     from modules.meta_parser import get_metadata_parser
@@ -674,12 +674,14 @@ def worker():
 
             task_rng = random.Random(task_seed)  # may bind to inpaint noise in the future
             task_prompt = apply_wildcards(prompt, task_rng, i, async_task.read_wildcards_in_order)
+            task_prompt = apply_dynamic_prompts(task_prompt, task_rng)
             task_prompt = apply_arrays(task_prompt, i)
             task_negative_prompt = apply_wildcards(negative_prompt, task_rng, i, async_task.read_wildcards_in_order)
-            task_extra_positive_prompts = [apply_wildcards(pmt, task_rng, i, async_task.read_wildcards_in_order) for pmt
+            task_negative_prompt = apply_dynamic_prompts(task_negative_prompt, task_rng)
+            task_extra_positive_prompts = [apply_dynamic_prompts(apply_wildcards(pmt, task_rng, i, async_task.read_wildcards_in_order), task_rng) for pmt
                                            in
                                            extra_positive_prompts]
-            task_extra_negative_prompts = [apply_wildcards(pmt, task_rng, i, async_task.read_wildcards_in_order) for pmt
+            task_extra_negative_prompts = [apply_dynamic_prompts(apply_wildcards(pmt, task_rng, i, async_task.read_wildcards_in_order), task_rng) for pmt
                                            in
                                            extra_negative_prompts]
 
