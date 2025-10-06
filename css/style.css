@@ -112,9 +112,7 @@ div:has(> #positive_prompt) {
   overflow: auto !important;
 }
 
-.performance_selection label {
-    width: 140px !important;
-}
+
 
 .aspect_ratios label {
     flex: calc(50% - 5px) !important;
