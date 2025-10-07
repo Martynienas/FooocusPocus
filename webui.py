@@ -697,6 +697,12 @@ with shared.gradio_root:
                             lora_ctrls += [lora_enabled, lora_model, lora_weight]
 
                 with gr.Row():
+                    random_lora_seed_increment = gr.Checkbox(label='Random LoRA per Image', 
+                                                           value=modules.config.default_random_lora_seed_increment,
+                                                           info='When Random LoRA is selected, use different LoRA for each image in batch. Uncheck to use same random LoRA for all images.',
+                                                           elem_classes='min_check')
+
+                with gr.Row():
                     refresh_files = gr.Button(label='Refresh', value='\U0001f504 Refresh All Files', variant='secondary', elem_classes='refresh_button')
             with gr.Tab(label='Advanced'):
                 guidance_scale = gr.Slider(label='Guidance Scale', minimum=1.0, maximum=30.0, step=0.01,
@@ -987,6 +993,7 @@ with shared.gradio_root:
         ]
 
         ctrls += [base_model, refiner_model, refiner_switch] + lora_ctrls
+        ctrls += [random_lora_seed_increment]
         ctrls += [input_image_checkbox, current_tab]
         ctrls += [uov_method, uov_input_image]
         ctrls += [outpaint_selections, inpaint_input_image, inpaint_additional_prompt, inpaint_mask_image]

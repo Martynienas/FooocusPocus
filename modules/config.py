@@ -427,6 +427,12 @@ default_advanced_checkbox = get_config_item_or_set_default(
     validator=lambda x: isinstance(x, bool),
     expected_type=bool
 )
+default_random_lora_seed_increment = get_config_item_or_set_default(
+    key='default_random_lora_seed_increment',
+    default_value=True,
+    validator=lambda x: isinstance(x, bool),
+    expected_type=bool
+)
 default_developer_debug_mode_checkbox = get_config_item_or_set_default(
     key='default_developer_debug_mode_checkbox',
     default_value=False,

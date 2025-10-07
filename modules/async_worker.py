@@ -47,6 +47,7 @@ class AsyncTask:
         self.refiner_switch = args.pop()
         self.loras = get_enabled_loras([(bool(args.pop()), str(args.pop()), float(args.pop())) for _ in
                                         range(default_max_lora_number)])
+        self.random_lora_seed_increment = args.pop()
         self.input_image_checkbox = args.pop()
         self.current_tab = args.pop()
         self.uov_method = args.pop()
@@ -678,7 +679,12 @@ def worker():
             task_loras = list(async_task.loras)  # Create a copy to avoid modifying the original
             for j, (lora_name, lora_weight) in enumerate(task_loras):
                 if lora_name == modules.config.random_lora_name:
-                    random_lora = modules.config.get_random_lora(task_rng)
+                    # Use consistent seed for all images if random_lora_seed_increment is False
+                    if async_task.random_lora_seed_increment:
+                        lora_rng = task_rng  # Different LoRA per image
+                    else:
+                        lora_rng = random.Random(async_task.seed)  # Same LoRA for all images
+                    random_lora = modules.config.get_random_lora(lora_rng)
                     task_loras[j] = (random_lora, lora_weight)
             
             task_prompt = apply_wildcards(prompt, task_rng, i, async_task.read_wildcards_in_order)
