@@ -653,17 +653,7 @@ def worker():
             current_progress += 1
         progressbar(async_task, current_progress, 'Loading models ...')
         lora_filenames = modules.config.lora_filenames
-        
-        # Process random LoRA selection - use the first task's seed for consistency
-        initial_seed = async_task.seed if not async_task.disable_seed_increment else async_task.seed
-        initial_rng = random.Random(initial_seed)
-        processed_loras = list(async_task.loras)  # Create a copy to avoid modifying the original
-        for j, (lora_name, lora_weight) in enumerate(processed_loras):
-            if lora_name == modules.config.random_lora_name:
-                random_lora = modules.config.get_random_lora(initial_rng)
-                processed_loras[j] = (random_lora, lora_weight)
-        
-        loras, prompt = parse_lora_references_from_prompt(prompt, processed_loras,
+        loras, prompt = parse_lora_references_from_prompt(prompt, async_task.loras,
                                                           modules.config.default_max_lora_number,
                                                           lora_filenames=lora_filenames)
         loras += async_task.performance_loras
@@ -683,6 +673,14 @@ def worker():
                 task_seed = (async_task.seed + i) % (constants.MAX_SEED + 1)  # randint is inclusive, % is not
 
             task_rng = random.Random(task_seed)  # may bind to inpaint noise in the future
+            
+            # Process random LoRA selection for this specific task/image
+            task_loras = list(async_task.loras)  # Create a copy to avoid modifying the original
+            for j, (lora_name, lora_weight) in enumerate(task_loras):
+                if lora_name == modules.config.random_lora_name:
+                    random_lora = modules.config.get_random_lora(task_rng)
+                    task_loras[j] = (random_lora, lora_weight)
+            
             task_prompt = apply_wildcards(prompt, task_rng, i, async_task.read_wildcards_in_order)
             task_prompt = apply_dynamic_prompts(task_prompt, task_rng)
             task_prompt = apply_arrays(task_prompt, i)
@@ -740,7 +738,8 @@ def worker():
                 negative_top_k=len(negative_basic_workloads),
                 log_positive_prompt='\n'.join([task_prompt] + task_extra_positive_prompts),
                 log_negative_prompt='\n'.join([task_negative_prompt] + task_extra_negative_prompts),
-                styles=task_styles
+                styles=task_styles,
+                task_loras=task_loras
             ))
         if use_expansion:
             if advance_progress:
@@ -1289,12 +1288,24 @@ def worker():
             progressbar(async_task, current_progress, f'Preparing task {current_task_id + 1}/{async_task.image_number} ...')
             execution_start_time = time.perf_counter()
 
+            # Process task-specific LoRAs if available
+            task_specific_loras = loras  # Default to global LoRAs
+            if 'task_loras' in task:
+                # Parse the task-specific LoRAs
+                task_loras_parsed, _ = parse_lora_references_from_prompt('', task['task_loras'],
+                                                                        modules.config.default_max_lora_number,
+                                                                        lora_filenames=modules.config.lora_filenames)
+                task_specific_loras = task_loras_parsed + async_task.performance_loras
+                
+                # Refresh pipeline with task-specific LoRAs
+                pipeline.refresh_loras(task_specific_loras, base_model_additional_loras)
+
             try:
                 imgs, img_paths, current_progress = process_task(all_steps, async_task, callback, controlnet_canny_path,
                                                                  controlnet_cpds_path, current_task_id,
                                                                  denoising_strength, final_scheduler_name, goals,
                                                                  initial_latent, async_task.steps, switch, task['c'],
-                                                                 task['uc'], task, loras, tiled, use_expansion, width,
+                                                                 task['uc'], task, task_specific_loras, tiled, use_expansion, width,
                                                                  height, current_progress, preparation_steps,
                                                                  async_task.image_number, show_intermediate_results,
                                                                  persist_image)
