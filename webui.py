@@ -159,14 +159,14 @@ with shared.gradio_root:
         # Left panel for prompts
         with gr.Column(scale=2, min_width=300):
             gr.HTML("<h3>Prompts</h3>")
-            prompt = gr.Textbox(label='Positive Prompt', show_label=True, placeholder="Type prompt here or paste parameters.", 
+            prompt = gr.Textbox(label='Positive Prompt', placeholder="Type prompt here or paste parameters.", 
                                 elem_id='positive_prompt', autofocus=True, lines=3, container=False)
 
             default_prompt = modules.config.default_prompt
             if isinstance(default_prompt, str) and default_prompt != '':
                 shared.gradio_root.load(lambda: default_prompt, outputs=prompt)
 
-            negative_prompt = gr.Textbox(label='Negative Prompt', show_label=True, placeholder="Describing what you do not want to see.",
+            negative_prompt = gr.Textbox(label='Negative Prompt', placeholder="Describing what you do not want to see.",
                                          lines=3, elem_id='negative_prompt', container=False,
                                          value=modules.config.default_prompt_negative)
             
