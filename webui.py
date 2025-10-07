@@ -689,7 +689,7 @@ with shared.gradio_root:
                             lora_enabled = gr.Checkbox(label='Enable', value=enabled,
                                                        elem_classes=['lora_enable', 'min_check'], scale=1)
                             lora_model = gr.Dropdown(label=f'LoRA {i + 1}',
-                                                     choices=['None'] + modules.config.lora_filenames, value=filename,
+                                                     choices=['None', modules.config.random_lora_name] + modules.config.lora_filenames, value=filename,
                                                      elem_classes='lora_model', scale=5)
                             lora_weight = gr.Slider(label='Weight', minimum=modules.config.default_loras_min_weight,
                                                     maximum=modules.config.default_loras_max_weight, step=0.01, value=weight,
@@ -890,7 +890,7 @@ with shared.gradio_root:
                         results += [gr.update(choices=modules.config.available_presets)]
                     for i in range(modules.config.default_max_lora_number):
                         results += [gr.update(interactive=True),
-                                    gr.update(choices=['None'] + modules.config.lora_filenames), gr.update()]
+                                    gr.update(choices=['None', modules.config.random_lora_name] + modules.config.lora_filenames), gr.update()]
                     return results
 
                 refresh_files_output = [base_model, refiner_model, vae_name]

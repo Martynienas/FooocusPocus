@@ -827,6 +827,17 @@ def update_files():
     return
 
 
+# Random LoRA functionality
+random_lora_name = 'Random LoRA'
+
+
+def get_random_lora(rng):
+    """Get a random LoRA from available LoRA files, similar to get_random_style"""
+    if not lora_filenames:
+        return 'None'
+    return rng.choice(lora_filenames)
+
+
 def downloading_inpaint_models(v):
     assert v in modules.flags.inpaint_engine_versions
 

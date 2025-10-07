@@ -653,7 +653,17 @@ def worker():
             current_progress += 1
         progressbar(async_task, current_progress, 'Loading models ...')
         lora_filenames = modules.config.lora_filenames
-        loras, prompt = parse_lora_references_from_prompt(prompt, async_task.loras,
+        
+        # Process random LoRA selection - use the first task's seed for consistency
+        initial_seed = async_task.seed if not async_task.disable_seed_increment else async_task.seed
+        initial_rng = random.Random(initial_seed)
+        processed_loras = list(async_task.loras)  # Create a copy to avoid modifying the original
+        for j, (lora_name, lora_weight) in enumerate(processed_loras):
+            if lora_name == modules.config.random_lora_name:
+                random_lora = modules.config.get_random_lora(initial_rng)
+                processed_loras[j] = (random_lora, lora_weight)
+        
+        loras, prompt = parse_lora_references_from_prompt(prompt, processed_loras,
                                                           modules.config.default_max_lora_number,
                                                           lora_filenames=lora_filenames)
         loras += async_task.performance_loras
@@ -701,6 +711,8 @@ def worker():
                         placeholder_replaced = True
                     positive_basic_workloads = positive_basic_workloads + p
                     negative_basic_workloads = negative_basic_workloads + n
+
+
 
                 if not placeholder_replaced:
                     positive_basic_workloads = [task_prompt] + positive_basic_workloads
