@@ -636,6 +636,7 @@ with shared.gradio_root:
 
                     return gr.update(value=f'<a href="file={href}" target="_blank">\U0001F4DA History Log</a>')
 
+                # history link (we'll put it between the navigation arrows)
                 history_link = gr.HTML()
                 # state to hold available logs and currently selected index
                 history_logs = gr.State([])
@@ -650,40 +651,48 @@ with shared.gradio_root:
                     href = logs[idx] if logs else get_current_html_path(output_format)
                     return gr.update(value=f'<a href="file={href}" target="_blank">\U0001F4DA History Log</a>'), logs, idx
 
-                # Navigation buttons to move between existing logs and a label showing selected date/folder
+                # Navigation buttons to move between existing logs; put the link (including date) between arrows
                 with gr.Row():
                     prev_btn = gr.Button(value='<<', variant='secondary')
-                    history_label = gr.HTML(value='')
+                    # history_link will be placed here (between the arrows)
+                    with gr.Column(scale=1, min_width=200):
+                        pass
                     next_btn = gr.Button(value='>>', variant='secondary')
 
+                # place the history_link into the UI by re-creating the row contents in markup
+                # NOTE: gradio layout will render components in the order they were created; we already created prev_btn and next_btn
+                # We'll now insert the history_link between them by creating it earlier; to keep code simple we'll rely on the
+                # existing history_link component created above and the layout will flow: prev_btn, history_link, next_btn.
+
                 def load_history_state_full():
-                    # returns: link_html, logs list, index, label_html
+                    # returns: link_html, logs list, index
                     if args_manager.args.disable_image_log:
-                        return gr.update(value=''), [], 0, gr.update(value='<small>No logs</small>')
+                        return gr.update(value=''), [], 0
                     logs = get_available_logs()
                     if not logs:
                         # no existing logs -> show no logs message and empty link
-                        return gr.update(value=''), [], 0, gr.update(value='<small>No logs</small>')
+                        return gr.update(value='<small>No logs</small>'), [], 0
                     idx = len(logs) - 1
                     href = logs[idx]
                     label = os.path.basename(os.path.dirname(href))
-                    return gr.update(value=f'<a href="file={href}" target="_blank">\U0001F4DA History Log</a>'), logs, idx, gr.update(value=f'<small>{label}</small>')
+                    # put the label into the anchor text so it appears as: "<< History Log - YYYY-MM-DD >>"
+                    return gr.update(value=f'<a href="file={href}" target="_blank">\U0001F4DA History Log - {label}</a>'), logs, idx
 
-                shared.gradio_root.load(load_history_state_full, outputs=[history_link, history_logs, history_index, history_label], queue=False, show_progress=False)
+                shared.gradio_root.load(load_history_state_full, outputs=[history_link, history_logs, history_index], queue=False, show_progress=False)
 
                 def navigate_logs(direction, logs, idx):
                     # direction: -1 for prev, +1 for next
                     if not isinstance(logs, list) or len(logs) == 0:
-                        return gr.update(value=''), [], 0, gr.update(value='<small>No logs</small>')
+                        return gr.update(value='<small>No logs</small>'), [], 0
                     idx = int(idx) if idx is not None else (len(logs) - 1)
                     idx = max(0, min(len(logs) - 1, idx + direction))
                     href = logs[idx]
                     label = os.path.basename(os.path.dirname(href))
-                    return gr.update(value=f'<a href="file={href}" target="_blank">\U0001F4DA History Log</a>'), logs, idx, gr.update(value=f'<small>{label}</small>')
+                    return gr.update(value=f'<a href="file={href}" target="_blank">\U0001F4DA History Log - {label}</a>'), logs, idx
 
-                # wire the navigation buttons; they update link, logs state, index state, and label
-                prev_btn.click(lambda logs, idx: navigate_logs(-1, logs, idx), inputs=[history_logs, history_index], outputs=[history_link, history_logs, history_index, history_label], queue=False, show_progress=False)
-                next_btn.click(lambda logs, idx: navigate_logs(1, logs, idx), inputs=[history_logs, history_index], outputs=[history_link, history_logs, history_index, history_label], queue=False, show_progress=False)
+                # wire the navigation buttons; they update link, logs state and index state
+                prev_btn.click(lambda logs, idx: navigate_logs(-1, logs, idx), inputs=[history_logs, history_index], outputs=[history_link, history_logs, history_index], queue=False, show_progress=False)
+                next_btn.click(lambda logs, idx: navigate_logs(1, logs, idx), inputs=[history_logs, history_index], outputs=[history_link, history_logs, history_index], queue=False, show_progress=False)
 
             with gr.Tab(label='Styles', elem_classes=['style_selections_tab']):
                 style_sorter.try_load_sorted_styles(
