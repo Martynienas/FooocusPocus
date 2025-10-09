@@ -13,6 +13,40 @@ from modules.util import generate_temp_filename
 log_cache = {}
 
 
+def get_available_logs():
+    """Return list of existing log.html paths under configured outputs folder, sorted by folder name."""
+    try:
+        base = modules.config.path_outputs
+    except Exception:
+        return []
+
+    if not os.path.isdir(base):
+        return []
+
+    candidates = []
+    try:
+        for name in os.listdir(base):
+            full = os.path.join(base, name)
+            if os.path.isdir(full):
+                log_html = os.path.join(full, 'log.html')
+                if os.path.exists(log_html):
+                    candidates.append(os.path.abspath(log_html))
+    except Exception:
+        return []
+
+    # Sort directories by name so that date-like folder names are ordered; keep ascending
+    candidates.sort()
+    return candidates
+
+
+def get_latest_log():
+    """Return most recent existing log.html path or None."""
+    logs = get_available_logs()
+    if not logs:
+        return None
+    return logs[-1]
+
+
 def get_current_html_path(output_format=None):
     output_format = output_format if output_format else modules.config.default_output_format
     date_string, local_temp_filename, only_name = generate_temp_filename(folder=modules.config.path_outputs,

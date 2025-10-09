@@ -19,7 +19,7 @@ import launch
 from extras.inpaint_mask import SAMOptions
 
 from modules.sdxl_styles import legal_style_names
-from modules.private_logger import get_current_html_path
+from modules.private_logger import get_current_html_path, get_available_logs, get_latest_log
 from modules.ui_gradio_extensions import reload_javascript
 from modules.auth import auth_enabled, check_auth
 from modules.util import is_json
@@ -626,10 +626,49 @@ with shared.gradio_root:
                     if args_manager.args.disable_image_log:
                         return gr.update(value='')
 
-                    return gr.update(value=f'<a href="file={get_current_html_path(output_format)}" target="_blank">\U0001F4DA History Log</a>')
+                    # Try to find latest existing log.html; fall back to the generated current path
+                    latest = get_latest_log()
+                    if latest is None:
+                        # use generated (may be non-existent) path so behavior is preserved
+                        href = get_current_html_path(output_format)
+                    else:
+                        href = latest
+
+                    return gr.update(value=f'<a href="file={href}" target="_blank">\U0001F4DA History Log</a>')
 
                 history_link = gr.HTML()
-                shared.gradio_root.load(update_history_link, outputs=history_link, queue=False, show_progress=False)
+                # state to hold available logs and currently selected index
+                history_logs = gr.State([])
+                history_index = gr.State(0)
+
+                def load_history_state():
+                    if args_manager.args.disable_image_log:
+                        return gr.update(), [] , 0
+                    logs = get_available_logs()
+                    idx = len(logs) - 1 if len(logs) > 0 else 0
+                    # return HTML value, logs list and index
+                    href = logs[idx] if logs else get_current_html_path(output_format)
+                    return gr.update(value=f'<a href="file={href}" target="_blank">\U0001F4DA History Log</a>'), logs, idx
+
+                shared.gradio_root.load(load_history_state, outputs=[history_link, history_logs, history_index], queue=False, show_progress=False)
+
+                # Navigation buttons to move between existing logs
+                with gr.Row():
+                    prev_btn = gr.Button(value='<<', variant='secondary')
+                    next_btn = gr.Button(value='>>', variant='secondary')
+
+                def navigate_logs(direction, logs, idx):
+                    # direction: -1 for prev, +1 for next
+                    if not isinstance(logs, list) or len(logs) == 0:
+                        href = get_current_html_path(output_format)
+                        return gr.update(value=f'<a href="file={href}" target="_blank">\U0001F4DA History Log</a>'), logs or [], 0
+                    idx = int(idx) if idx is not None else (len(logs) - 1)
+                    idx = max(0, min(len(logs) - 1, idx + direction))
+                    href = logs[idx]
+                    return gr.update(value=f'<a href="file={href}" target="_blank">\U0001F4DA History Log</a>'), logs, idx
+
+                prev_btn.click(lambda logs, idx: navigate_logs(-1, logs, idx), inputs=[history_logs, history_index], outputs=[history_link, history_logs, history_index], queue=False, show_progress=False)
+                next_btn.click(lambda logs, idx: navigate_logs(1, logs, idx), inputs=[history_logs, history_index], outputs=[history_link, history_logs, history_index], queue=False, show_progress=False)
 
             with gr.Tab(label='Styles', elem_classes=['style_selections_tab']):
                 style_sorter.try_load_sorted_styles(
