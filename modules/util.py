@@ -487,76 +487,97 @@ def apply_dynamic_prompts(text, rng) -> str:
     - {2$$option1|option2|option3} - select 2 random options
     - {1-3$$option1|option2|option3} - select 1-3 random options
     """
-    import re
-    
     original_text = text
-    
-    # Check if there are any dynamic prompts to process
-    if not (re.search(r'\{[^}]*\|[^}]*\}', text) or re.search(r'\{\d+(?:-\d+)?\$\$[^}]*\}', text)):
+
+    # Quick check to avoid heavy work when no dynamic syntax present
+    if '{' not in text or '}' not in text or ('|' not in text and '$$' not in text):
         return text
-    
-    # Process multiple selection syntax first: {count$$options}
-    multi_pattern = r'\{(\d+(?:-\d+)?)\$\$(.*?)\}'
-    
-    def replace_multi_choice(match):
-        count_str = match.group(1)
-        options_str = match.group(2)
-        
-        # Parse options
-        options = [opt.strip() for opt in options_str.split('|') if opt.strip()]
-        if not options:
-            return match.group(0)  # Return original if no valid options
-        
-        # Parse count (could be single number or range)
-        if '-' in count_str:
-            try:
-                min_count, max_count = map(int, count_str.split('-'))
-                if min_count > max_count:
-                    min_count, max_count = max_count, min_count  # Swap if reversed
-                if min_count < 0:
-                    min_count = 0
-                if max_count < 0:
-                    max_count = 0
-                count = rng.randint(min_count, max_count) if max_count > min_count else min_count
-            except (ValueError, IndexError):
-                count = 1  # Default to 1 if parsing fails
+
+    # Resolve innermost braces first using a stack-like approach
+    max_iterations = 1024
+    iterations = 0
+    while True:
+        iterations += 1
+        if iterations > max_iterations:
+            # Safety guard against pathological cases
+            break
+
+        start = text.rfind('{')
+        if start == -1:
+            break
+        end = text.find('}', start)
+        if end == -1:
+            break
+
+        inner = text[start + 1:end]
+
+        replacement = None
+
+        # Multiple selection syntax: count$$option1|option2|...
+        if '$$' in inner:
+            parts = inner.split('$$', 1)
+            count_str = parts[0].strip()
+            options_str = parts[1]
+            options = [opt.strip() for opt in options_str.split('|') if opt.strip()]
+            if not options:
+                replacement = '{' + inner + '}'
+            else:
+                # Parse count (single number or range)
+                count = 1
+                if '-' in count_str:
+                    try:
+                        min_count, max_count = map(int, count_str.split('-'))
+                        if min_count > max_count:
+                            min_count, max_count = max_count, min_count
+                        if min_count < 0:
+                            min_count = 0
+                        if max_count < 0:
+                            max_count = 0
+                        count = rng.randint(min_count, max_count) if max_count > min_count else min_count
+                    except Exception:
+                        count = 1
+                else:
+                    try:
+                        count = int(count_str)
+                        if count < 0:
+                            count = 1
+                    except Exception:
+                        count = 1
+
+                count = min(count, len(options))
+                # If count == len(options) just join; otherwise sample unique options
+                if count <= 0:
+                    replacement = ''
+                elif count == len(options):
+                    replacement = ', '.join(options)
+                else:
+                    try:
+                        replacement = ', '.join(rng.sample(options, count))
+                    except Exception:
+                        replacement = ', '.join(options[:count])
+
+        # Single choice syntax: option1|option2|...
+        elif '|' in inner:
+            options = [opt.strip() for opt in inner.split('|') if opt.strip()]
+            if not options:
+                replacement = '{' + inner + '}'
+            else:
+                replacement = rng.choice(options)
+
+        # Nothing to do; treat as literal
         else:
-            try:
-                count = int(count_str)
-                if count < 0:
-                    count = 1  # Default to 1 for negative counts
-            except ValueError:
-                count = 1  # Default to 1 if parsing fails
-        
-        # Ensure count doesn't exceed available options
-        count = min(count, len(options))
-        
-        # Select unique random options
-        selected = rng.sample(options, count)
-        
-        # Join with comma and space
-        return ', '.join(selected)
-    
-    # Apply multiple selection replacements
-    text = re.sub(multi_pattern, replace_multi_choice, text)
-    
-    # Process single choice syntax: {option1|option2|option3}
-    single_pattern = r'\{([^}]*\|[^}]*)\}'
-    
-    def replace_single_choice(match):
-        options_str = match.group(1)
-        options = [opt.strip() for opt in options_str.split('|') if opt.strip()]
-        if not options:
-            return match.group(0)  # Return original if no valid options
-        return rng.choice(options)
-    
-    # Apply single choice replacements
-    text = re.sub(single_pattern, replace_single_choice, text)
-    
-    # Log the processing if text changed
+            replacement = '{' + inner + '}'
+
+        # Replace the innermost brace group with its resolved text
+        new_text = text[:start] + (replacement if replacement is not None else '') + text[end + 1:]
+        if new_text == text:
+            # Avoid infinite loop
+            break
+        text = new_text
+
     if text != original_text:
         print(f'[Dynamic Prompts] {original_text} -> {text}')
-    
+
     return text
 
 
