@@ -966,7 +966,12 @@ with shared.gradio_root:
             # Configuration Tab - Manage application configuration
             # =========================================================================
             with gr.Tab(label='Configuration'):
-                gr.HTML('<p style="margin-bottom: 10px; color: var(--body-text-color-subdued);">Manage application settings. Changes are saved automatically.</p>')
+                # --- Save/Restore Buttons at TOP (always visible) ---
+                with gr.Row(equal_height=True):
+                    save_config_btn = gr.Button('💾 Save Configuration', variant='primary', scale=2, size='lg')
+                    restore_all_btn = gr.Button('↺ Restore All to Defaults', variant='secondary', scale=1, size='lg')
+                config_status = gr.HTML('')
+                gr.HTML('<hr style="margin: 10px 0;">')
                 
                 # Store for config UI elements
                 config_ui_elements = {}
@@ -1218,14 +1223,6 @@ with shared.gradio_root:
                             value=modules.config.default_black_out_nsfw
                         )
                         blackout_nsfw_reset = gr.Button('↺ Reset', variant='secondary', elem_classes=['reset-btn'])
-                
-                # --- Save/Restore Buttons ---
-                gr.HTML('<hr style="margin: 20px 0;">')
-                with gr.Row():
-                    save_config_btn = gr.Button('💾 Save Configuration', variant='primary', scale=2)
-                    restore_all_btn = gr.Button('↺ Restore All to Defaults', variant='secondary', scale=1)
-                
-                config_status = gr.HTML('')
                 
                 # =========================================================================
                 # Configuration Tab Event Handlers
