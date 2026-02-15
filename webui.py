@@ -1019,28 +1019,28 @@ with shared.gradio_root:
                     with gr.Group():
                         gr.HTML('<label class="config-label">Other Model Paths</label>')
                         with gr.Row():
-                            embeddings_path = gr.Textbox(label='Embeddings', value=modules.config.path_embeddings, scale=3)
+                            embeddings_path = gr.Textbox(label='Embeddings', value=modules.config.path_embeddings, scale=3, interactive=True)
                             embeddings_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                         with gr.Row():
-                            vae_path = gr.Textbox(label='VAE', value=modules.config.path_vae, scale=3)
+                            vae_path = gr.Textbox(label='VAE', value=modules.config.path_vae, scale=3, interactive=True)
                             vae_path_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                         with gr.Row():
-                            controlnet_path = gr.Textbox(label='ControlNet', value=modules.config.path_controlnet, scale=3)
+                            controlnet_path = gr.Textbox(label='ControlNet', value=modules.config.path_controlnet, scale=3, interactive=True)
                             controlnet_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                         with gr.Row():
-                            upscale_path = gr.Textbox(label='Upscale Models', value=modules.config.path_upscale_models, scale=3)
+                            upscale_path = gr.Textbox(label='Upscale Models', value=modules.config.path_upscale_models, scale=3, interactive=True)
                             upscale_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                 
                 # --- Output & Paths Section ---
                 with gr.Accordion(label='📂 Output & Paths', open=False, elem_classes=['config-section']):
                     with gr.Row():
-                        output_path = gr.Textbox(label='Output Path', value=modules.config.path_outputs, scale=3)
+                        output_path = gr.Textbox(label='Output Path', value=modules.config.path_outputs, scale=3, interactive=True)
                         output_path_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                     with gr.Row():
-                        temp_path_config = gr.Textbox(label='Temp Path', value=modules.config.temp_path, scale=3)
+                        temp_path_config = gr.Textbox(label='Temp Path', value=modules.config.temp_path, scale=3, interactive=True)
                         temp_path_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                     with gr.Row():
-                        temp_cleanup = gr.Checkbox(label='Cleanup Temp on Launch', value=modules.config.temp_path_cleanup_on_launch)
+                        temp_cleanup = gr.Checkbox(label='Cleanup Temp on Launch', value=modules.config.temp_path_cleanup_on_launch, interactive=True)
                         temp_cleanup_reset = gr.Button('↺ Reset', variant='secondary', elem_classes=['reset-btn'])
                 
                 # --- Default Models Section ---
@@ -1050,7 +1050,8 @@ with shared.gradio_root:
                             label='Default Base Model',
                             choices=modules.config.model_filenames,
                             value=modules.config.default_base_model_name,
-                            scale=3
+                            scale=3,
+                            interactive=True
                         )
                         default_model_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                     with gr.Row():
@@ -1058,7 +1059,8 @@ with shared.gradio_root:
                             label='Default Refiner Model',
                             choices=['None'] + modules.config.model_filenames,
                             value=modules.config.default_refiner_model_name,
-                            scale=3
+                            scale=3,
+                            interactive=True
                         )
                         default_refiner_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                     with gr.Row():
@@ -1066,7 +1068,8 @@ with shared.gradio_root:
                             label='Default Refiner Switch',
                             minimum=0.1, maximum=1.0, step=0.01,
                             value=modules.config.default_refiner_switch,
-                            scale=3
+                            scale=3,
+                            interactive=True
                         )
                         refiner_switch_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                     with gr.Row():
@@ -1074,7 +1077,8 @@ with shared.gradio_root:
                             label='Default VAE',
                             choices=[flags.default_vae] + modules.config.vae_filenames,
                             value=modules.config.default_vae,
-                            scale=3
+                            scale=3,
+                            interactive=True
                         )
                         default_vae_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                 
@@ -1085,7 +1089,8 @@ with shared.gradio_root:
                             label='Default Steps',
                             minimum=1, maximum=200, step=1,
                             value=modules.config.default_steps,
-                            scale=3
+                            scale=3,
+                            interactive=True
                         )
                         default_steps_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                     with gr.Row():
@@ -1093,7 +1098,8 @@ with shared.gradio_root:
                             label='Default Upscale Steps',
                             minimum=1, maximum=200, step=1,
                             value=modules.config.default_upscale_steps,
-                            scale=3
+                            scale=3,
+                            interactive=True
                         )
                         upscale_steps_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                     with gr.Row():
@@ -1101,7 +1107,8 @@ with shared.gradio_root:
                             label='Default CFG Scale',
                             minimum=1.0, maximum=30.0, step=0.1,
                             value=modules.config.default_cfg_scale,
-                            scale=3
+                            scale=3,
+                            interactive=True
                         )
                         cfg_scale_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                     with gr.Row():
@@ -1109,7 +1116,8 @@ with shared.gradio_root:
                             label='Default Sharpness',
                             minimum=0.0, maximum=30.0, step=0.01,
                             value=modules.config.default_sample_sharpness,
-                            scale=3
+                            scale=3,
+                            interactive=True
                         )
                         sharpness_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                     with gr.Row():
@@ -1117,7 +1125,8 @@ with shared.gradio_root:
                             label='Default Sampler',
                             choices=flags.sampler_list,
                             value=modules.config.default_sampler,
-                            scale=3
+                            scale=3,
+                            interactive=True
                         )
                         sampler_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                     with gr.Row():
@@ -1125,7 +1134,8 @@ with shared.gradio_root:
                             label='Default Scheduler',
                             choices=flags.scheduler_list,
                             value=modules.config.default_scheduler,
-                            scale=3
+                            scale=3,
+                            interactive=True
                         )
                         scheduler_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                     with gr.Row():
@@ -1133,7 +1143,8 @@ with shared.gradio_root:
                             label='Default CLIP Skip',
                             minimum=1, maximum=flags.clip_skip_max, step=1,
                             value=modules.config.default_clip_skip,
-                            scale=3
+                            scale=3,
+                            interactive=True
                         )
                         clip_skip_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                     with gr.Row():
@@ -1141,7 +1152,8 @@ with shared.gradio_root:
                             label='Default Adaptive CFG',
                             minimum=1.0, maximum=30.0, step=0.1,
                             value=modules.config.default_cfg_tsnr,
-                            scale=3
+                            scale=3,
+                            interactive=True
                         )
                         adaptive_cfg_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                 
@@ -1151,7 +1163,8 @@ with shared.gradio_root:
                         label='Default Styles',
                         choices=modules.sdxl_styles.legal_style_names,
                         value=modules.config.default_styles,
-                        elem_classes=['config-styles']
+                        elem_classes=['config-styles'],
+                        interactive=True
                     )
                     default_styles_reset = gr.Button('↺ Reset to Default Styles', variant='secondary', elem_classes=['reset-btn'])
                 
@@ -1162,7 +1175,8 @@ with shared.gradio_root:
                             label='Default Image Number',
                             minimum=1, maximum=modules.config.default_max_image_number, step=1,
                             value=modules.config.default_image_number,
-                            scale=3
+                            scale=3,
+                            interactive=True
                         )
                         image_number_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                     with gr.Row():
@@ -1170,7 +1184,8 @@ with shared.gradio_root:
                             label='Max Image Number',
                             minimum=1, maximum=100, step=1,
                             value=modules.config.default_max_image_number,
-                            scale=3
+                            scale=3,
+                            interactive=True
                         )
                         max_images_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                     with gr.Row():
@@ -1178,7 +1193,8 @@ with shared.gradio_root:
                             label='Default Output Format',
                             choices=flags.OutputFormat.list(),
                             value=modules.config.default_output_format,
-                            scale=3
+                            scale=3,
+                            interactive=True
                         )
                         output_format_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                     with gr.Row():
@@ -1186,7 +1202,8 @@ with shared.gradio_root:
                             label='Default Aspect Ratio',
                             choices=modules.config.available_aspect_ratios,
                             value=modules.config.default_aspect_ratio.replace('×', '*').split(' ')[0],
-                            scale=3
+                            scale=3,
+                            interactive=True
                         )
                         aspect_ratio_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
                 
@@ -1195,19 +1212,22 @@ with shared.gradio_root:
                     with gr.Row():
                         config_advanced_cb = gr.Checkbox(
                             label='Show Advanced Panel by Default',
-                            value=modules.config.default_advanced_checkbox
+                            value=modules.config.default_advanced_checkbox,
+                            interactive=True
                         )
                         advanced_cb_reset = gr.Button('↺ Reset', variant='secondary', elem_classes=['reset-btn'])
                     with gr.Row():
                         config_debug_mode = gr.Checkbox(
                             label='Developer Debug Mode by Default',
-                            value=modules.config.default_developer_debug_mode_checkbox
+                            value=modules.config.default_developer_debug_mode_checkbox,
+                            interactive=True
                         )
                         debug_mode_reset = gr.Button('↺ Reset', variant='secondary', elem_classes=['reset-btn'])
                     with gr.Row():
                         config_save_metadata = gr.Checkbox(
                             label='Save Metadata to Images by Default',
-                            value=modules.config.default_save_metadata_to_images
+                            value=modules.config.default_save_metadata_to_images,
+                            interactive=True
                         )
                         save_metadata_reset = gr.Button('↺ Reset', variant='secondary', elem_classes=['reset-btn'])
                     with gr.Row():
@@ -1215,12 +1235,14 @@ with shared.gradio_root:
                             label='Default Metadata Scheme',
                             choices=flags.metadata_scheme,
                             value=modules.config.default_metadata_scheme,
-                            visible=modules.config.default_save_metadata_to_images
+                            visible=modules.config.default_save_metadata_to_images,
+                            interactive=True
                         )
                     with gr.Row():
                         config_blackout_nsfw = gr.Checkbox(
                             label='Black Out NSFW by Default',
-                            value=modules.config.default_black_out_nsfw
+                            value=modules.config.default_black_out_nsfw,
+                            interactive=True
                         )
                         blackout_nsfw_reset = gr.Button('↺ Reset', variant='secondary', elem_classes=['reset-btn'])
                 
