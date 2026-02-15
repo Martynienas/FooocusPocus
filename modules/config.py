@@ -1248,6 +1248,9 @@ def add_model_folder(folder_type, folder_path):
     new_folders = current + [folder_path]
     config_dict[folder_type] = new_folders
     
+    # Save config to make it persistent
+    save_config()
+    
     return True, f"Added folder: {folder_path}", new_folders
 
 
@@ -1286,6 +1289,9 @@ def remove_model_folder(folder_type, folder_path):
             return False, "Cannot remove the last folder", current
     
     config_dict[folder_type] = new_folders
+    
+    # Save config to make it persistent
+    save_config()
     
     return True, f"Removed folder: {folder_path}", new_folders
 
