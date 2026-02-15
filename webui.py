@@ -1246,6 +1246,8 @@ with shared.gradio_root:
                         reload_result = modules.config.reload_model_files()
                         new_count = reload_result.get('model_count', 0)
                         print(f"✓ {message}. Found {new_count} new models.")
+                        print(f"  Total models now: {len(modules.config.model_filenames)}")
+                        print(f"  First few: {modules.config.model_filenames[:3]}")
                         return (
                             gr.update(value=[[p] for p in new_folders]),
                             gr.update(choices=modules.config.model_filenames),
