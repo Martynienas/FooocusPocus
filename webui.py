@@ -12,6 +12,7 @@ import modules.constants as constants
 import modules.flags as flags
 import modules.gradio_hijack as grh
 import modules.style_sorter as style_sorter
+import modules.style_manager as style_manager
 import modules.meta_parser
 import args_manager
 import copy
@@ -726,6 +727,164 @@ with shared.gradio_root:
                                                        queue=False,
                                                        show_progress=False).then(
                     lambda: None, _js='()=>{refresh_style_localization();}')
+
+            with gr.Tab(label='Style Manager'):
+                gr.HTML("<h3>Style Manager</h3><p>Create, edit, and delete custom styles.</p>")
+                
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        # Style list section
+                        gr.HTML("<h4>Existing Styles</h4>")
+                        style_manager_dropdown = gr.Dropdown(
+                            label='Select Style to Edit/Delete',
+                            choices=style_manager.get_styles_for_dropdown(),
+                            interactive=True,
+                            elem_classes=['style-manager-dropdown']
+                        )
+                        style_manager_refresh_btn = gr.Button('\U0001f504 Refresh List', variant='secondary', size='sm')
+                        
+                        # Style info display
+                        style_info_name = gr.Textbox(label='Style Name', interactive=False, visible=False)
+                        style_info_prompt = gr.Textbox(label='Prompt Template', interactive=False, visible=False, lines=3)
+                        style_info_negative = gr.Textbox(label='Negative Prompt', interactive=False, visible=False, lines=3)
+                        style_info_type = gr.Textbox(label='Type', interactive=False, visible=False)
+                        
+                    with gr.Column(scale=1):
+                        # Create/Edit section
+                        gr.HTML("<h4>Create / Edit Style</h4>")
+                        style_edit_name = gr.Textbox(
+                            label='Style Name',
+                            placeholder='Enter style name...',
+                            interactive=True
+                        )
+                        style_edit_prompt = gr.Textbox(
+                            label='Prompt Template',
+                            placeholder='Use {prompt} as placeholder for user prompt...',
+                            interactive=True,
+                            lines=3
+                        )
+                        style_edit_negative = gr.Textbox(
+                            label='Negative Prompt',
+                            placeholder='Negative prompt for this style...',
+                            interactive=True,
+                            lines=3
+                        )
+                        
+                        with gr.Row():
+                            style_create_btn = gr.Button('Create New Style', variant='primary')
+                            style_update_btn = gr.Button('Update Selected', variant='secondary')
+                            style_delete_btn = gr.Button('Delete Selected', variant='stop')
+                        
+                        style_manager_message = gr.HTML(visible=False)
+                
+                # Hidden state for tracking selected style
+                selected_style_state = gr.State('')
+                
+                # Event handlers for style manager
+                def refresh_style_list():
+                    style_manager.reload_styles()
+                    import copy
+                    return gr.Dropdown.update(choices=style_manager.get_styles_for_dropdown()), \
+                           gr.CheckboxGroup.update(choices=copy.deepcopy(style_sorter.all_styles))
+                
+                def on_style_selected(style_name):
+                    if not style_name:
+                        return (
+                            gr.Textbox.update(value='', visible=False),
+                            gr.Textbox.update(value='', visible=False),
+                            gr.Textbox.update(value='', visible=False),
+                            gr.Textbox.update(value='', visible=False),
+                            gr.Textbox.update(value='', visible=False),
+                            ''
+                        )
+                    
+                    prompt, negative = style_manager.get_style_details(style_name)
+                    is_system = style_manager.is_system_style(style_name)
+                    style_type = 'System (Read-only)' if is_system else 'User (Editable)'
+                    
+                    return (
+                        gr.Textbox.update(value=style_name, visible=True),
+                        gr.Textbox.update(value=prompt, visible=True),
+                        gr.Textbox.update(value=negative, visible=True),
+                        gr.Textbox.update(value=style_type, visible=True),
+                        gr.Textbox.update(value=style_name, visible=True),
+                        style_name
+                    )
+                
+                def on_style_create(name, prompt, negative):
+                    import copy
+                    if not name or not name.strip():
+                        return '<span style="color: red;">Error: Style name cannot be empty!</span>', \
+                               gr.Dropdown.update(), gr.CheckboxGroup.update()
+                    
+                    success, message = style_manager.create_style(name, prompt, negative)
+                    if success:
+                        return f'<span style="color: green;">{message}</span>', \
+                               gr.Dropdown.update(choices=style_manager.get_styles_for_dropdown()), \
+                               gr.CheckboxGroup.update(choices=copy.deepcopy(style_sorter.all_styles))
+                    else:
+                        return f'<span style="color: red;">{message}</span>', \
+                               gr.Dropdown.update(), gr.CheckboxGroup.update()
+                
+                def on_style_update(old_name, new_name, prompt, negative):
+                    import copy
+                    if not old_name:
+                        return '<span style="color: red;">Error: No style selected for update!</span>', \
+                               gr.Dropdown.update(), gr.CheckboxGroup.update()
+                    
+                    success, message = style_manager.update_style(old_name, new_name, prompt, negative)
+                    if success:
+                        return f'<span style="color: green;">{message}</span>', \
+                               gr.Dropdown.update(choices=style_manager.get_styles_for_dropdown()), \
+                               gr.CheckboxGroup.update(choices=copy.deepcopy(style_sorter.all_styles))
+                    else:
+                        return f'<span style="color: red;">{message}</span>', \
+                               gr.Dropdown.update(), gr.CheckboxGroup.update()
+                
+                def on_style_delete(style_name):
+                    import copy
+                    if not style_name:
+                        return '<span style="color: red;">Error: No style selected for deletion!</span>', \
+                               gr.Dropdown.update(), gr.CheckboxGroup.update()
+                    
+                    success, message = style_manager.delete_style(style_name)
+                    if success:
+                        return f'<span style="color: green;">{message}</span>', \
+                               gr.Dropdown.update(choices=style_manager.get_styles_for_dropdown()), \
+                               gr.CheckboxGroup.update(choices=copy.deepcopy(style_sorter.all_styles))
+                    else:
+                        return f'<span style="color: red;">{message}</span>', \
+                               gr.Dropdown.update(), gr.CheckboxGroup.update()
+                
+                # Wire up events
+                style_manager_dropdown.change(
+                    on_style_selected,
+                    inputs=[style_manager_dropdown],
+                    outputs=[style_info_name, style_info_prompt, style_info_negative, style_info_type, style_edit_name, selected_style_state]
+                )
+                
+                style_manager_refresh_btn.click(
+                    refresh_style_list,
+                    outputs=[style_manager_dropdown, style_selections]
+                )
+                
+                style_create_btn.click(
+                    on_style_create,
+                    inputs=[style_edit_name, style_edit_prompt, style_edit_negative],
+                    outputs=[style_manager_message, style_manager_dropdown, style_selections]
+                ).then(lambda: gr.HTML.update(visible=True), outputs=style_manager_message)
+                
+                style_update_btn.click(
+                    on_style_update,
+                    inputs=[selected_style_state, style_edit_name, style_edit_prompt, style_edit_negative],
+                    outputs=[style_manager_message, style_manager_dropdown, style_selections]
+                ).then(lambda: gr.HTML.update(visible=True), outputs=style_manager_message)
+                
+                style_delete_btn.click(
+                    on_style_delete,
+                    inputs=[selected_style_state],
+                    outputs=[style_manager_message, style_manager_dropdown, style_selections]
+                ).then(lambda: gr.HTML.update(visible=True), outputs=style_manager_message)
 
             with gr.Tab(label='Models'):
                 with gr.Group():
