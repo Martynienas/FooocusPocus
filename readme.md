@@ -53,9 +53,18 @@ A dedicated Configuration tab for managing all application settings in one place
   - Negative prompt repositioned for easier access
   - Expanded view improvements
 
+- **Generation History Navigation**
+  - Previous/Next buttons to browse through generation history
+  - Quick access to past generations and their logs
+
 - **Better Logging**
   - Enhanced console output for debugging
   - Progress indicators for model operations
+
+### 🎲 Random LoRA Option
+
+- Select "Random LoRA" from the LoRA dropdown to use a random LoRA from your collection
+- Great for experimentation and discovering new styles
 
 ### 🔧 Bug Fixes
 
@@ -91,6 +100,8 @@ Below is a summary of all changes compared to the original Fooocus:
 | Model Folders | Add/remove model folders dynamically without restart |
 | Auto-save Settings | All configuration changes saved automatically |
 | UI Layout | Prompts moved to left panel, negative prompt repositioned |
+| Generation History | Navigate through previous generations with << / >> buttons |
+| Random LoRA | Option to use a random LoRA from your collection |
 | Logging | Enhanced console output and progress indicators |
 | Bug Fixes | Various Gradio error fixes and improved error handling |
 
