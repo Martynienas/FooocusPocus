@@ -1515,15 +1515,41 @@ with shared.gradio_root:
                 def auto_save_config(key, value):
                     """Update config value and auto-save."""
                     modules.config.update_config_value(key, value)
+                    modules.config.save_config()
                     return ''
                 
                 # Wire auto-save for key settings
                 config_default_model.change(lambda v: auto_save_config('default_model', v), inputs=[config_default_model])
                 config_default_refiner.change(lambda v: auto_save_config('default_refiner', v), inputs=[config_default_refiner])
                 config_refiner_switch.change(lambda v: auto_save_config('default_refiner_switch', v), inputs=[config_refiner_switch])
+                config_default_vae.change(lambda v: auto_save_config('default_vae', v), inputs=[config_default_vae])
                 config_default_steps.change(lambda v: auto_save_config('default_steps', v), inputs=[config_default_steps])
+                config_upscale_steps.change(lambda v: auto_save_config('default_upscale_steps', v), inputs=[config_upscale_steps])
                 config_cfg_scale.change(lambda v: auto_save_config('default_cfg_scale', v), inputs=[config_cfg_scale])
+                config_sharpness.change(lambda v: auto_save_config('default_sample_sharpness', v), inputs=[config_sharpness])
+                config_sampler.change(lambda v: auto_save_config('default_sampler', v), inputs=[config_sampler])
+                config_scheduler.change(lambda v: auto_save_config('default_scheduler', v), inputs=[config_scheduler])
+                config_clip_skip.change(lambda v: auto_save_config('default_clip_skip', v), inputs=[config_clip_skip])
+                config_adaptive_cfg.change(lambda v: auto_save_config('default_cfg_tsnr', v), inputs=[config_adaptive_cfg])
                 config_default_styles.change(lambda v: auto_save_config('default_styles', v), inputs=[config_default_styles])
+                config_image_number.change(lambda v: auto_save_config('default_image_number', v), inputs=[config_image_number])
+                config_max_images.change(lambda v: auto_save_config('default_max_image_number', v), inputs=[config_max_images])
+                config_output_format.change(lambda v: auto_save_config('default_output_format', v), inputs=[config_output_format])
+                config_aspect_ratio.change(lambda v: auto_save_config('default_aspect_ratio', v.replace('*', '×')), inputs=[config_aspect_ratio])
+                config_advanced_cb.change(lambda v: auto_save_config('default_advanced_checkbox', v), inputs=[config_advanced_cb])
+                config_debug_mode.change(lambda v: auto_save_config('default_developer_debug_mode_checkbox', v), inputs=[config_debug_mode])
+                config_save_metadata.change(lambda v: auto_save_config('default_save_metadata_to_images', v), inputs=[config_save_metadata])
+                config_metadata_scheme.change(lambda v: auto_save_config('default_metadata_scheme', v), inputs=[config_metadata_scheme])
+                config_blackout_nsfw.change(lambda v: auto_save_config('default_black_out_nsfw', v), inputs=[config_blackout_nsfw])
+                
+                # Wire auto-save for path settings
+                embeddings_path.change(lambda v: auto_save_config('path_embeddings', v), inputs=[embeddings_path])
+                vae_path.change(lambda v: auto_save_config('path_vae', v), inputs=[vae_path])
+                controlnet_path.change(lambda v: auto_save_config('path_controlnet', v), inputs=[controlnet_path])
+                upscale_path.change(lambda v: auto_save_config('path_upscale_models', v), inputs=[upscale_path])
+                output_path.change(lambda v: auto_save_config('path_outputs', v), inputs=[output_path])
+                temp_path_config.change(lambda v: auto_save_config('temp_path', v), inputs=[temp_path_config])
+                temp_cleanup.change(lambda v: auto_save_config('temp_path_cleanup_on_launch', v), inputs=[temp_cleanup])
 
         state_is_generating = gr.State(False)
 
