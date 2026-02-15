@@ -1535,7 +1535,7 @@ with shared.gradio_root:
                 config_image_number.change(lambda v: auto_save_config('default_image_number', v), inputs=[config_image_number])
                 config_max_images.change(lambda v: auto_save_config('default_max_image_number', v), inputs=[config_max_images])
                 config_output_format.change(lambda v: auto_save_config('default_output_format', v), inputs=[config_output_format])
-                config_aspect_ratio.change(lambda v: auto_save_config('default_aspect_ratio', v.replace('*', '×')), inputs=[config_aspect_ratio])
+                config_aspect_ratio.change(lambda v: auto_save_config('default_aspect_ratio', v), inputs=[config_aspect_ratio])
                 config_advanced_cb.change(lambda v: auto_save_config('default_advanced_checkbox', v), inputs=[config_advanced_cb])
                 config_debug_mode.change(lambda v: auto_save_config('default_developer_debug_mode_checkbox', v), inputs=[config_debug_mode])
                 config_save_metadata.change(lambda v: auto_save_config('default_save_metadata_to_images', v), inputs=[config_save_metadata])

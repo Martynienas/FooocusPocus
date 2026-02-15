@@ -1139,6 +1139,9 @@ def save_config(specific_keys=None):
         # Filter to only include keys that exist in config_dict
         config_to_save = {k: config_dict[k] for k in keys_to_save if k in config_dict}
         
+        print(f"[Config] Saving {len(config_to_save)} keys to {config_path}")
+        print(f"[Config] Keys: {list(config_to_save.keys())}")
+        
         with open(config_path, "w", encoding="utf-8") as json_file:
             json.dump(config_to_save, json_file, indent=4)
         
@@ -1161,6 +1164,7 @@ def update_config_value(key, value):
     """
     global config_dict, always_save_keys
     
+    print(f"[Config] Updating {key} = {value}")
     config_dict[key] = value
     
     if key not in always_save_keys:
