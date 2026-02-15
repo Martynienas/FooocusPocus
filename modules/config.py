@@ -812,7 +812,11 @@ def get_model_filenames(folder_paths, extensions=None, name_filter=None):
     if not isinstance(folder_paths, list):
         folder_paths = [folder_paths]
     for folder in folder_paths:
-        files += get_files_from_folder(folder, extensions, name_filter)
+        try:
+            files += get_files_from_folder(folder, extensions, name_filter)
+        except (ValueError, FileNotFoundError) as e:
+            print(f"  [Config] Skipping invalid folder: {folder} ({e})")
+            continue
 
     return files
 
