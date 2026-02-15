@@ -1013,3 +1013,326 @@ def downloading_sam_vit_h():
         file_name='sam_vit_h_4b8939.pth'
     )
     return os.path.join(path_sam, 'sam_vit_h_4b8939.pth')
+
+
+# =============================================================================
+# Configuration Management for UI
+# =============================================================================
+
+# Default configuration values for restore functionality
+# These are the built-in defaults that settings can be restored to
+DEFAULT_CONFIG = {
+    # Model paths
+    'path_checkpoints': ['../models/checkpoints/'],
+    'path_loras': ['../models/loras/'],
+    'path_embeddings': '../models/embeddings/',
+    'path_vae': '../models/vae/',
+    'path_vae_approx': '../models/vae_approx/',
+    'path_upscale_models': '../models/upscale_models/',
+    'path_inpaint': '../models/inpaint/',
+    'path_controlnet': '../models/controlnet/',
+    'path_clip_vision': '../models/clip_vision/',
+    'path_fooocus_expansion': '../models/prompt_expansion/fooocus_expansion',
+    'path_wildcards': '../wildcards/',
+    'path_safety_checker': '../models/safety_checker/',
+    'path_sam': '../models/sam/',
+    'path_outputs': '../outputs/',
+    
+    # Default models
+    'default_model': 'model.safetensors',
+    'default_refiner': 'None',
+    'default_refiner_switch': 0.8,
+    'default_vae': modules.flags.default_vae,
+    
+    # Default LoRAs
+    'default_loras': [
+        [True, 'None', 1.0],
+        [True, 'None', 1.0],
+        [True, 'None', 1.0],
+        [True, 'None', 1.0],
+        [True, 'None', 1.0]
+    ],
+    'default_loras_min_weight': -2,
+    'default_loras_max_weight': 2,
+    'default_max_lora_number': 5,
+    
+    # Generation settings
+    'default_steps': 25,
+    'default_upscale_steps': 20,
+    'default_cfg_scale': 7.0,
+    'default_sample_sharpness': 2.0,
+    'default_sampler': 'dpmpp_2m_sde_gpu',
+    'default_scheduler': 'karras',
+    'default_cfg_tsnr': 7.0,
+    'default_clip_skip': 2,
+    
+    # Styles and prompts
+    'default_styles': ['Fooocus V2', 'Fooocus Enhance', 'Fooocus Sharp'],
+    'default_prompt': '',
+    'default_prompt_negative': '',
+    
+    # Image settings
+    'default_image_number': 2,
+    'default_max_image_number': 32,
+    'default_output_format': 'png',
+    'available_aspect_ratios': modules.flags.sdxl_aspect_ratios,
+    'default_aspect_ratio': '1152*896',
+    
+    # UI defaults
+    'default_advanced_checkbox': True,
+    'default_developer_debug_mode_checkbox': False,
+    'default_image_prompt_checkbox': False,
+    'default_enhance_checkbox': False,
+    'default_image_prompt_advanced_checkbox': False,
+    'default_inpaint_advanced_masking_checkbox': False,
+    'default_inpaint_method': modules.flags.inpaint_option_default,
+    'default_inpaint_engine_version': 'v2.6',
+    
+    # Additional settings
+    'default_save_metadata_to_images': False,
+    'default_metadata_scheme': MetadataScheme.FOOOCUS.value,
+    'default_black_out_nsfw': False,
+    'default_save_only_final_enhanced_image': False,
+    'default_overwrite_step': -1,
+    'default_overwrite_switch': -1,
+    'default_overwrite_upscale': -1,
+    'temp_path_cleanup_on_launch': True,
+    
+    # Downloads
+    'checkpoint_downloads': {},
+    'lora_downloads': {},
+    'embeddings_downloads': {},
+    'vae_downloads': {},
+    'previous_default_models': [],
+}
+
+
+def get_default_config_value(key):
+    """Get the default value for a config key.
+    
+    Args:
+        key: The configuration key to look up
+        
+    Returns:
+        The default value for the key, or None if key not found
+    """
+    return DEFAULT_CONFIG.get(key)
+
+
+def save_config(specific_keys=None):
+    """Save the current configuration to the config file.
+    
+    Args:
+        specific_keys: Optional list of keys to save. If None, saves all keys in always_save_keys.
+        
+    Returns:
+        bool: True if save was successful, False otherwise
+    """
+    global config_dict, always_save_keys
+    
+    try:
+        keys_to_save = specific_keys if specific_keys else always_save_keys
+        # Filter to only include keys that exist in config_dict
+        config_to_save = {k: config_dict[k] for k in keys_to_save if k in config_dict}
+        
+        with open(config_path, "w", encoding="utf-8") as json_file:
+            json.dump(config_to_save, json_file, indent=4)
+        
+        print(f"Configuration saved to {config_path}")
+        return True
+    except Exception as e:
+        print(f"Failed to save configuration: {e}")
+        return False
+
+
+def update_config_value(key, value):
+    """Update a single configuration value and optionally save.
+    
+    Args:
+        key: The configuration key to update
+        value: The new value
+        
+    Returns:
+        bool: True if update was successful
+    """
+    global config_dict, always_save_keys
+    
+    config_dict[key] = value
+    
+    if key not in always_save_keys:
+        always_save_keys.append(key)
+    
+    return True
+
+
+def restore_config_to_default(key):
+    """Restore a specific configuration key to its default value.
+    
+    Args:
+        key: The configuration key to restore
+        
+    Returns:
+        The default value that was restored, or None if key not found
+    """
+    global config_dict, always_save_keys
+    
+    default_value = get_default_config_value(key)
+    if default_value is not None:
+        config_dict[key] = default_value
+        
+        if key not in always_save_keys:
+            always_save_keys.append(key)
+            
+        return default_value
+    
+    return None
+
+
+def restore_all_to_defaults():
+    """Restore all configuration values to their defaults.
+    
+    Returns:
+        bool: True if successful
+    """
+    global config_dict, always_save_keys
+    
+    for key, value in DEFAULT_CONFIG.items():
+        config_dict[key] = value
+        if key not in always_save_keys:
+            always_save_keys.append(key)
+    
+    save_config()
+    return True
+
+
+def add_model_folder(folder_type, folder_path):
+    """Add a model folder to a multi-folder path config.
+    
+    Args:
+        folder_type: The config key for the folder type (e.g., 'path_checkpoints')
+        folder_path: The path to add
+        
+    Returns:
+        tuple: (success: bool, message: str, new_folders: list)
+    """
+    global config_dict
+    
+    # Validate folder path
+    if not os.path.exists(folder_path):
+        return False, f"Folder does not exist: {folder_path}", None
+    
+    if not os.path.isdir(folder_path):
+        return False, f"Path is not a directory: {folder_path}", None
+    
+    # Get current folders
+    current = config_dict.get(folder_type, [])
+    
+    # Handle single-path configs by converting to list
+    if isinstance(current, str):
+        current = [current]
+    elif not isinstance(current, list):
+        current = [current]
+    
+    # Check if already exists
+    abs_path = os.path.abspath(folder_path)
+    current_abs = [os.path.abspath(p) for p in current]
+    
+    if abs_path in current_abs:
+        return False, f"Folder already in list: {folder_path}", current
+    
+    # Add new folder
+    new_folders = current + [folder_path]
+    config_dict[folder_type] = new_folders
+    
+    return True, f"Added folder: {folder_path}", new_folders
+
+
+def remove_model_folder(folder_type, folder_path):
+    """Remove a model folder from a multi-folder path config.
+    
+    Args:
+        folder_type: The config key for the folder type
+        folder_path: The path to remove
+        
+    Returns:
+        tuple: (success: bool, message: str, new_folders: list)
+    """
+    global config_dict
+    
+    current = config_dict.get(folder_type, [])
+    
+    if isinstance(current, str):
+        current = [current]
+    elif not isinstance(current, list):
+        current = [current]
+    
+    # Find and remove the folder
+    abs_path = os.path.abspath(folder_path)
+    new_folders = [p for p in current if os.path.abspath(p) != abs_path]
+    
+    if len(new_folders) == len(current):
+        return False, f"Folder not found: {folder_path}", current
+    
+    # Ensure at least one folder remains
+    if len(new_folders) == 0:
+        default_folders = get_default_config_value(folder_type)
+        if default_folders:
+            new_folders = [default_folders] if isinstance(default_folders, str) else default_folders
+        else:
+            return False, "Cannot remove the last folder", current
+    
+    config_dict[folder_type] = new_folders
+    
+    return True, f"Removed folder: {folder_path}", new_folders
+
+
+def get_model_folders(folder_type):
+    """Get the list of folders for a model type.
+    
+    Args:
+        folder_type: The config key for the folder type
+        
+    Returns:
+        list: List of folder paths
+    """
+    global config_dict
+    
+    current = config_dict.get(folder_type, [])
+    
+    if isinstance(current, str):
+        return [current]
+    elif isinstance(current, list):
+        return current
+    
+    return []
+
+
+def reload_model_files():
+    """Reload model files from all configured folders.
+    
+    This function scans all model folders and updates the file lists.
+    
+    Returns:
+        dict: Dictionary with counts of new files found per type
+    """
+    global model_filenames, lora_filenames, vae_filenames
+    
+    old_models = set(model_filenames)
+    old_loras = set(lora_filenames)
+    old_vaes = set(vae_filenames)
+    
+    update_files()
+    
+    new_models = set(model_filenames) - old_models
+    new_loras = set(lora_filenames) - old_loras
+    new_vaes = set(vae_filenames) - old_vaes
+    
+    return {
+        'models': list(new_models),
+        'loras': list(new_loras),
+        'vaes': list(new_vaes),
+        'model_count': len(new_models),
+        'lora_count': len(new_loras),
+        'vae_count': len(new_vaes),
+        'total_new': len(new_models) + len(new_loras) + len(new_vaes)
+    }

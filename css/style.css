@@ -446,3 +446,167 @@ body {
 #inpaint_brush_color input[type=color]{
   background: none;
 }
+
+/* =============================================================================
+   Configuration Section Styles
+   ============================================================================= */
+
+/* Configuration section accordions */
+.config-section {
+  margin-bottom: 10px !important;
+}
+
+.config-section .label-wrap {
+  padding: 10px 15px !important;
+  background: var(--background-fill-secondary) !important;
+  border-radius: 8px !important;
+}
+
+.config-section .label-wrap:hover {
+  background: var(--background-fill-tertiary) !important;
+}
+
+/* Configuration labels */
+.config-label {
+  display: block;
+  font-weight: 500;
+  margin-bottom: 8px;
+  color: var(--body-text-color);
+  font-size: 0.95em;
+}
+
+/* Folder display table */
+.folder-display {
+  max-height: 150px;
+  overflow-y: auto;
+  border-radius: 6px;
+  margin-bottom: 10px;
+}
+
+.folder-display table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.folder-display td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color-primary);
+  font-family: monospace;
+  font-size: 0.9em;
+}
+
+.folder-display tr:last-child td {
+  border-bottom: none;
+}
+
+/* Folder buttons */
+.folder-btn {
+  min-width: 80px !important;
+}
+
+/* Reset buttons */
+.reset-btn {
+  min-width: 100px !important;
+  background: var(--button-secondary-background-fill) !important;
+}
+
+.reset-btn:hover {
+  background: var(--button-secondary-background-fill-hover) !important;
+}
+
+.reset-btn-mini {
+  min-width: 40px !important;
+  max-width: 40px !important;
+  padding: 0 8px !important;
+  background: var(--button-secondary-background-fill) !important;
+  font-size: 1.1em !important;
+}
+
+.reset-btn-mini:hover {
+  background: var(--button-secondary-background-fill-hover) !important;
+}
+
+/* Config styles checkbox group */
+.config-styles {
+  max-height: 250px;
+  overflow-y: auto;
+  padding: 10px;
+  border: 1px solid var(--border-color-primary);
+  border-radius: 8px;
+}
+
+.config-styles label {
+  flex: calc(50% - 10px) !important;
+  margin: 4px !important;
+}
+
+/* Configuration status message */
+.config-status {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 6px;
+}
+
+/* Row with reset button */
+.config-row-with-reset {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.config-row-with-reset > div:first-child {
+  flex: 1;
+}
+
+/* Responsive adjustments for config section */
+@media (max-width: 768px) {
+  .reset-btn-mini {
+    min-width: 36px !important;
+    max-width: 36px !important;
+  }
+  
+  .folder-btn {
+    min-width: 60px !important;
+  }
+  
+  .reset-btn {
+    min-width: 80px !important;
+  }
+}
+
+/* Highlight effect for changed settings */
+.config-changed {
+  border-left: 3px solid var(--color-accent) !important;
+  padding-left: 10px !important;
+}
+
+/* Tooltip for reset buttons */
+.reset-btn[title], .reset-btn-mini[title] {
+  cursor: help;
+}
+
+/* Group styling in config sections */
+.config-section .gr-group {
+  margin-bottom: 15px;
+  padding: 12px;
+  border: 1px solid var(--border-color-primary);
+  border-radius: 8px;
+  background: var(--background-fill-primary);
+}
+
+/* Better spacing for config inputs */
+.config-section input[type="text"],
+.config-section select,
+.config-section .gradio-dropdown {
+  margin-bottom: 5px;
+}
+
+/* Save/Restore buttons area */
+.config-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 15px;
+  margin-top: 20px;
+  padding-top: 15px;
+  border-top: 1px solid var(--border-color-primary);
+}

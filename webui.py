@@ -962,6 +962,534 @@ with shared.gradio_root:
                 refresh_files.click(refresh_files_clicked, [], refresh_files_output + lora_ctrls,
                                     queue=False, show_progress=False)
 
+            # =========================================================================
+            # Configuration Tab - Manage application configuration
+            # =========================================================================
+            with gr.Tab(label='Configuration'):
+                gr.HTML('<p style="margin-bottom: 10px; color: var(--body-text-color-subdued);">Manage application settings. Changes are saved automatically.</p>')
+                
+                # Store for config UI elements
+                config_ui_elements = {}
+                
+                # --- Model Folders Section ---
+                with gr.Accordion(label='📁 Model Folders', open=True, elem_classes=['config-section']):
+                    gr.HTML('<p style="color: var(--body-text-color-subdued); font-size: 0.9em;">Add or remove folders where models are stored. Changes take effect immediately.</p>')
+                    
+                    # Checkpoints folders
+                    with gr.Group():
+                        gr.HTML('<label class="config-label">Checkpoint Folders</label>')
+                        checkpoint_folders_state = gr.State(value=lambda: modules.config.get_model_folders('path_checkpoints'))
+                        checkpoint_folders_display = gr.Dataframe(
+                            headers=['Path'],
+                            datatype=['str'],
+                            col_count=(1, 'fixed'),
+                            row_count=1,
+                            value=lambda: [[p] for p in modules.config.get_model_folders('path_checkpoints')],
+                            interactive=False,
+                            elem_classes=['folder-display']
+                        )
+                        with gr.Row():
+                            checkpoint_folder_input = gr.Textbox(label='Add Checkpoint Folder', placeholder='/path/to/checkpoints', scale=4)
+                            checkpoint_add_btn = gr.Button('Add', variant='secondary', scale=1, elem_classes=['folder-btn'])
+                            checkpoint_reset_btn = gr.Button('↺ Reset', variant='secondary', scale=1, elem_classes=['reset-btn'])
+                    
+                    # LoRA folders
+                    with gr.Group():
+                        gr.HTML('<label class="config-label">LoRA Folders</label>')
+                        lora_folders_display = gr.Dataframe(
+                            headers=['Path'],
+                            datatype=['str'],
+                            col_count=(1, 'fixed'),
+                            row_count=1,
+                            value=lambda: [[p] for p in modules.config.get_model_folders('path_loras')],
+                            interactive=False,
+                            elem_classes=['folder-display']
+                        )
+                        with gr.Row():
+                            lora_folder_input = gr.Textbox(label='Add LoRA Folder', placeholder='/path/to/loras', scale=4)
+                            lora_add_btn = gr.Button('Add', variant='secondary', scale=1, elem_classes=['folder-btn'])
+                            lora_reset_btn = gr.Button('↺ Reset', variant='secondary', scale=1, elem_classes=['reset-btn'])
+                    
+                    # Other model paths (single folder)
+                    with gr.Group():
+                        gr.HTML('<label class="config-label">Other Model Paths</label>')
+                        with gr.Row():
+                            embeddings_path = gr.Textbox(label='Embeddings', value=modules.config.path_embeddings, scale=3)
+                            embeddings_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                        with gr.Row():
+                            vae_path = gr.Textbox(label='VAE', value=modules.config.path_vae, scale=3)
+                            vae_path_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                        with gr.Row():
+                            controlnet_path = gr.Textbox(label='ControlNet', value=modules.config.path_controlnet, scale=3)
+                            controlnet_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                        with gr.Row():
+                            upscale_path = gr.Textbox(label='Upscale Models', value=modules.config.path_upscale_models, scale=3)
+                            upscale_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                
+                # --- Output & Paths Section ---
+                with gr.Accordion(label='📂 Output & Paths', open=False, elem_classes=['config-section']):
+                    with gr.Row():
+                        output_path = gr.Textbox(label='Output Path', value=modules.config.path_outputs, scale=3)
+                        output_path_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                    with gr.Row():
+                        temp_path_config = gr.Textbox(label='Temp Path', value=modules.config.temp_path, scale=3)
+                        temp_path_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                    with gr.Row():
+                        temp_cleanup = gr.Checkbox(label='Cleanup Temp on Launch', value=modules.config.temp_path_cleanup_on_launch)
+                        temp_cleanup_reset = gr.Button('↺ Reset', variant='secondary', elem_classes=['reset-btn'])
+                
+                # --- Default Models Section ---
+                with gr.Accordion(label='🎨 Default Models', open=False, elem_classes=['config-section']):
+                    with gr.Row():
+                        config_default_model = gr.Dropdown(
+                            label='Default Base Model',
+                            choices=modules.config.model_filenames,
+                            value=modules.config.default_base_model_name,
+                            scale=3
+                        )
+                        default_model_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                    with gr.Row():
+                        config_default_refiner = gr.Dropdown(
+                            label='Default Refiner Model',
+                            choices=['None'] + modules.config.model_filenames,
+                            value=modules.config.default_refiner_model_name,
+                            scale=3
+                        )
+                        default_refiner_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                    with gr.Row():
+                        config_refiner_switch = gr.Slider(
+                            label='Default Refiner Switch',
+                            minimum=0.1, maximum=1.0, step=0.01,
+                            value=modules.config.default_refiner_switch,
+                            scale=3
+                        )
+                        refiner_switch_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                    with gr.Row():
+                        config_default_vae = gr.Dropdown(
+                            label='Default VAE',
+                            choices=[flags.default_vae] + modules.config.vae_filenames,
+                            value=modules.config.default_vae,
+                            scale=3
+                        )
+                        default_vae_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                
+                # --- Default Generation Settings Section ---
+                with gr.Accordion(label='⚡ Default Generation Settings', open=False, elem_classes=['config-section']):
+                    with gr.Row():
+                        config_default_steps = gr.Slider(
+                            label='Default Steps',
+                            minimum=1, maximum=200, step=1,
+                            value=modules.config.default_steps,
+                            scale=3
+                        )
+                        default_steps_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                    with gr.Row():
+                        config_upscale_steps = gr.Slider(
+                            label='Default Upscale Steps',
+                            minimum=1, maximum=200, step=1,
+                            value=modules.config.default_upscale_steps,
+                            scale=3
+                        )
+                        upscale_steps_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                    with gr.Row():
+                        config_cfg_scale = gr.Slider(
+                            label='Default CFG Scale',
+                            minimum=1.0, maximum=30.0, step=0.1,
+                            value=modules.config.default_cfg_scale,
+                            scale=3
+                        )
+                        cfg_scale_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                    with gr.Row():
+                        config_sharpness = gr.Slider(
+                            label='Default Sharpness',
+                            minimum=0.0, maximum=30.0, step=0.01,
+                            value=modules.config.default_sample_sharpness,
+                            scale=3
+                        )
+                        sharpness_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                    with gr.Row():
+                        config_sampler = gr.Dropdown(
+                            label='Default Sampler',
+                            choices=flags.sampler_list,
+                            value=modules.config.default_sampler,
+                            scale=3
+                        )
+                        sampler_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                    with gr.Row():
+                        config_scheduler = gr.Dropdown(
+                            label='Default Scheduler',
+                            choices=flags.scheduler_list,
+                            value=modules.config.default_scheduler,
+                            scale=3
+                        )
+                        scheduler_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                    with gr.Row():
+                        config_clip_skip = gr.Slider(
+                            label='Default CLIP Skip',
+                            minimum=1, maximum=flags.clip_skip_max, step=1,
+                            value=modules.config.default_clip_skip,
+                            scale=3
+                        )
+                        clip_skip_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                    with gr.Row():
+                        config_adaptive_cfg = gr.Slider(
+                            label='Default Adaptive CFG',
+                            minimum=1.0, maximum=30.0, step=0.1,
+                            value=modules.config.default_cfg_tsnr,
+                            scale=3
+                        )
+                        adaptive_cfg_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                
+                # --- Default Styles Section ---
+                with gr.Accordion(label='🎭 Default Styles', open=False, elem_classes=['config-section']):
+                    config_default_styles = gr.CheckboxGroup(
+                        label='Default Styles',
+                        choices=modules.sdxl_styles.legal_style_names,
+                        value=modules.config.default_styles,
+                        elem_classes=['config-styles']
+                    )
+                    default_styles_reset = gr.Button('↺ Reset to Default Styles', variant='secondary', elem_classes=['reset-btn'])
+                
+                # --- Image Settings Section ---
+                with gr.Accordion(label='🖼️ Image Settings', open=False, elem_classes=['config-section']):
+                    with gr.Row():
+                        config_image_number = gr.Slider(
+                            label='Default Image Number',
+                            minimum=1, maximum=modules.config.default_max_image_number, step=1,
+                            value=modules.config.default_image_number,
+                            scale=3
+                        )
+                        image_number_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                    with gr.Row():
+                        config_max_images = gr.Slider(
+                            label='Max Image Number',
+                            minimum=1, maximum=100, step=1,
+                            value=modules.config.default_max_image_number,
+                            scale=3
+                        )
+                        max_images_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                    with gr.Row():
+                        config_output_format = gr.Radio(
+                            label='Default Output Format',
+                            choices=flags.OutputFormat.list(),
+                            value=modules.config.default_output_format,
+                            scale=3
+                        )
+                        output_format_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                    with gr.Row():
+                        config_aspect_ratio = gr.Radio(
+                            label='Default Aspect Ratio',
+                            choices=modules.config.available_aspect_ratios,
+                            value=modules.config.default_aspect_ratio.replace('×', '*').split(' ')[0],
+                            scale=3
+                        )
+                        aspect_ratio_reset = gr.Button('↺', variant='secondary', scale=1, elem_classes=['reset-btn-mini'])
+                
+                # --- UI Defaults Section ---
+                with gr.Accordion(label='🔧 UI Defaults', open=False, elem_classes=['config-section']):
+                    with gr.Row():
+                        config_advanced_cb = gr.Checkbox(
+                            label='Show Advanced Panel by Default',
+                            value=modules.config.default_advanced_checkbox
+                        )
+                        advanced_cb_reset = gr.Button('↺ Reset', variant='secondary', elem_classes=['reset-btn'])
+                    with gr.Row():
+                        config_debug_mode = gr.Checkbox(
+                            label='Developer Debug Mode by Default',
+                            value=modules.config.default_developer_debug_mode_checkbox
+                        )
+                        debug_mode_reset = gr.Button('↺ Reset', variant='secondary', elem_classes=['reset-btn'])
+                    with gr.Row():
+                        config_save_metadata = gr.Checkbox(
+                            label='Save Metadata to Images by Default',
+                            value=modules.config.default_save_metadata_to_images
+                        )
+                        save_metadata_reset = gr.Button('↺ Reset', variant='secondary', elem_classes=['reset-btn'])
+                    with gr.Row():
+                        config_metadata_scheme = gr.Radio(
+                            label='Default Metadata Scheme',
+                            choices=flags.metadata_scheme,
+                            value=modules.config.default_metadata_scheme,
+                            visible=modules.config.default_save_metadata_to_images
+                        )
+                    with gr.Row():
+                        config_blackout_nsfw = gr.Checkbox(
+                            label='Black Out NSFW by Default',
+                            value=modules.config.default_black_out_nsfw
+                        )
+                        blackout_nsfw_reset = gr.Button('↺ Reset', variant='secondary', elem_classes=['reset-btn'])
+                
+                # --- Save/Restore Buttons ---
+                gr.HTML('<hr style="margin: 20px 0;">')
+                with gr.Row():
+                    save_config_btn = gr.Button('💾 Save Configuration', variant='primary', scale=2)
+                    restore_all_btn = gr.Button('↺ Restore All to Defaults', variant='secondary', scale=1)
+                
+                config_status = gr.HTML('')
+                
+                # =========================================================================
+                # Configuration Tab Event Handlers
+                # =========================================================================
+                
+                def update_folder_display(folder_type):
+                    """Get updated folder list for display."""
+                    folders = modules.config.get_model_folders(folder_type)
+                    return gr.update(value=[[p] for p in folders])
+                
+                def add_checkpoint_folder(folder_path):
+                    """Add a checkpoint folder and return updated display."""
+                    if not folder_path or folder_path.strip() == '':
+                        return gr.update(), gr.Info("Please enter a folder path")
+                    
+                    success, message, new_folders = modules.config.add_model_folder('path_checkpoints', folder_path.strip())
+                    if success:
+                        reload_result = modules.config.reload_model_files()
+                        new_count = reload_result.get('model_count', 0)
+                        return (
+                            gr.update(value=[[p] for p in new_folders]),
+                            gr.Info(f"✓ {message}. Found {new_count} new models.")
+                        )
+                    else:
+                        return gr.update(), gr.Info(f"✗ {message}")
+                
+                def add_lora_folder(folder_path):
+                    """Add a LoRA folder and return updated display."""
+                    if not folder_path or folder_path.strip() == '':
+                        return gr.update(), gr.Info("Please enter a folder path")
+                    
+                    success, message, new_folders = modules.config.add_model_folder('path_loras', folder_path.strip())
+                    if success:
+                        reload_result = modules.config.reload_model_files()
+                        new_count = reload_result.get('lora_count', 0)
+                        return (
+                            gr.update(value=[[p] for p in new_folders]),
+                            gr.Info(f"✓ {message}. Found {new_count} new LoRAs.")
+                        )
+                    else:
+                        return gr.update(), gr.Info(f"✗ {message}")
+                
+                def reset_checkpoint_folders():
+                    """Reset checkpoint folders to default."""
+                    default = modules.config.get_default_config_value('path_checkpoints')
+                    modules.config.config_dict['path_checkpoints'] = default
+                    modules.config.reload_model_files()
+                    return gr.update(value=[[p] for p in default])
+                
+                def reset_lora_folders():
+                    """Reset LoRA folders to default."""
+                    default = modules.config.get_default_config_value('path_loras')
+                    modules.config.config_dict['path_loras'] = default
+                    modules.config.reload_model_files()
+                    return gr.update(value=[[p] for p in default])
+                
+                def reset_single_path(key, current_value):
+                    """Reset a single path config to default."""
+                    default = modules.config.get_default_config_value(key)
+                    if default:
+                        modules.config.config_dict[key] = default
+                        return gr.update(value=default)
+                    return gr.update()
+                
+                def reset_slider_value(key):
+                    """Reset a slider value to default."""
+                    default = modules.config.get_default_config_value(key)
+                    if default is not None:
+                        modules.config.config_dict[key] = default
+                        return gr.update(value=default)
+                    return gr.update()
+                
+                def reset_dropdown_value(key, choices=None):
+                    """Reset a dropdown value to default."""
+                    default = modules.config.get_default_config_value(key)
+                    if default is not None:
+                        modules.config.config_dict[key] = default
+                        return gr.update(value=default)
+                    return gr.update()
+                
+                def reset_checkbox_value(key):
+                    """Reset a checkbox value to default."""
+                    default = modules.config.get_default_config_value(key)
+                    if default is not None:
+                        modules.config.config_dict[key] = default
+                        return gr.update(value=default)
+                    return gr.update()
+                
+                def save_all_config():
+                    """Save all configuration to file."""
+                    if modules.config.save_config():
+                        return '<p style="color: green; padding: 10px;">✓ Configuration saved successfully!</p>'
+                    else:
+                        return '<p style="color: red; padding: 10px;">✗ Failed to save configuration</p>'
+                
+                def restore_all_defaults():
+                    """Restore all configuration to defaults."""
+                    modules.config.restore_all_to_defaults()
+                    modules.config.reload_model_files()
+                    return '<p style="color: green; padding: 10px;">✓ All settings restored to defaults!</p>'
+                
+                # Wire up folder management events
+                checkpoint_add_btn.click(
+                    add_checkpoint_folder,
+                    inputs=[checkpoint_folder_input],
+                    outputs=[checkpoint_folders_display]
+                )
+                checkpoint_reset_btn.click(
+                    reset_checkpoint_folders,
+                    outputs=[checkpoint_folders_display]
+                )
+                
+                lora_add_btn.click(
+                    add_lora_folder,
+                    inputs=[lora_folder_input],
+                    outputs=[lora_folders_display]
+                )
+                lora_reset_btn.click(
+                    reset_lora_folders,
+                    outputs=[lora_folders_display]
+                )
+                
+                # Wire up single path resets
+                embeddings_reset.click(
+                    lambda: reset_single_path('path_embeddings', modules.config.path_embeddings),
+                    outputs=[embeddings_path]
+                )
+                vae_path_reset.click(
+                    lambda: reset_single_path('path_vae', modules.config.path_vae),
+                    outputs=[vae_path]
+                )
+                controlnet_reset.click(
+                    lambda: reset_single_path('path_controlnet', modules.config.path_controlnet),
+                    outputs=[controlnet_path]
+                )
+                upscale_reset.click(
+                    lambda: reset_single_path('path_upscale_models', modules.config.path_upscale_models),
+                    outputs=[upscale_path]
+                )
+                output_path_reset.click(
+                    lambda: reset_single_path('path_outputs', modules.config.path_outputs),
+                    outputs=[output_path]
+                )
+                temp_path_reset.click(
+                    lambda: reset_single_path('temp_path', modules.config.temp_path),
+                    outputs=[temp_path_config]
+                )
+                temp_cleanup_reset.click(
+                    lambda: reset_checkbox_value('temp_path_cleanup_on_launch'),
+                    outputs=[temp_cleanup]
+                )
+                
+                # Wire up default model resets
+                default_model_reset.click(
+                    lambda: reset_dropdown_value('default_model'),
+                    outputs=[config_default_model]
+                )
+                default_refiner_reset.click(
+                    lambda: reset_dropdown_value('default_refiner'),
+                    outputs=[config_default_refiner]
+                )
+                refiner_switch_reset.click(
+                    lambda: reset_slider_value('default_refiner_switch'),
+                    outputs=[config_refiner_switch]
+                )
+                default_vae_reset.click(
+                    lambda: reset_dropdown_value('default_vae'),
+                    outputs=[config_default_vae]
+                )
+                
+                # Wire up generation settings resets
+                default_steps_reset.click(
+                    lambda: reset_slider_value('default_steps'),
+                    outputs=[config_default_steps]
+                )
+                upscale_steps_reset.click(
+                    lambda: reset_slider_value('default_upscale_steps'),
+                    outputs=[config_upscale_steps]
+                )
+                cfg_scale_reset.click(
+                    lambda: reset_slider_value('default_cfg_scale'),
+                    outputs=[config_cfg_scale]
+                )
+                sharpness_reset.click(
+                    lambda: reset_slider_value('default_sample_sharpness'),
+                    outputs=[config_sharpness]
+                )
+                sampler_reset.click(
+                    lambda: reset_dropdown_value('default_sampler'),
+                    outputs=[config_sampler]
+                )
+                scheduler_reset.click(
+                    lambda: reset_dropdown_value('default_scheduler'),
+                    outputs=[config_scheduler]
+                )
+                clip_skip_reset.click(
+                    lambda: reset_slider_value('default_clip_skip'),
+                    outputs=[config_clip_skip]
+                )
+                adaptive_cfg_reset.click(
+                    lambda: reset_slider_value('default_cfg_tsnr'),
+                    outputs=[config_adaptive_cfg]
+                )
+                
+                # Wire up styles reset
+                default_styles_reset.click(
+                    lambda: reset_dropdown_value('default_styles'),
+                    outputs=[config_default_styles]
+                )
+                
+                # Wire up image settings resets
+                image_number_reset.click(
+                    lambda: reset_slider_value('default_image_number'),
+                    outputs=[config_image_number]
+                )
+                max_images_reset.click(
+                    lambda: reset_slider_value('default_max_image_number'),
+                    outputs=[config_max_images]
+                )
+                output_format_reset.click(
+                    lambda: reset_dropdown_value('default_output_format'),
+                    outputs=[config_output_format]
+                )
+                aspect_ratio_reset.click(
+                    lambda: reset_dropdown_value('default_aspect_ratio'),
+                    outputs=[config_aspect_ratio]
+                )
+                
+                # Wire up UI defaults resets
+                advanced_cb_reset.click(
+                    lambda: reset_checkbox_value('default_advanced_checkbox'),
+                    outputs=[config_advanced_cb]
+                )
+                debug_mode_reset.click(
+                    lambda: reset_checkbox_value('default_developer_debug_mode_checkbox'),
+                    outputs=[config_debug_mode]
+                )
+                save_metadata_reset.click(
+                    lambda: reset_checkbox_value('default_save_metadata_to_images'),
+                    outputs=[config_save_metadata]
+                )
+                blackout_nsfw_reset.click(
+                    lambda: reset_checkbox_value('default_black_out_nsfw'),
+                    outputs=[config_blackout_nsfw]
+                )
+                
+                # Wire up save/restore all
+                save_config_btn.click(save_all_config, outputs=[config_status])
+                restore_all_btn.click(restore_all_defaults, outputs=[config_status])
+                
+                # Auto-save on config changes
+                def auto_save_config(key, value):
+                    """Update config value and auto-save."""
+                    modules.config.update_config_value(key, value)
+                    return ''
+                
+                # Wire auto-save for key settings
+                config_default_model.change(lambda v: auto_save_config('default_model', v), inputs=[config_default_model])
+                config_default_refiner.change(lambda v: auto_save_config('default_refiner', v), inputs=[config_default_refiner])
+                config_refiner_switch.change(lambda v: auto_save_config('default_refiner_switch', v), inputs=[config_refiner_switch])
+                config_default_steps.change(lambda v: auto_save_config('default_steps', v), inputs=[config_default_steps])
+                config_cfg_scale.change(lambda v: auto_save_config('default_cfg_scale', v), inputs=[config_cfg_scale])
+                config_default_styles.change(lambda v: auto_save_config('default_styles', v), inputs=[config_default_styles])
+
         state_is_generating = gr.State(False)
 
         load_data_outputs = [advanced_checkbox, image_number, prompt, negative_prompt, style_selections,
