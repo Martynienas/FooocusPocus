@@ -1315,7 +1315,12 @@ def reload_model_files():
     Returns:
         dict: Dictionary with counts of new files found per type
     """
-    global model_filenames, lora_filenames, vae_filenames
+    global model_filenames, lora_filenames, vae_filenames, paths_checkpoints, paths_loras
+    
+    # Update global path variables from config_dict
+    # This ensures newly added folders are included
+    paths_checkpoints = get_model_folders('path_checkpoints')
+    paths_loras = get_model_folders('path_loras')
     
     old_models = set(model_filenames)
     old_loras = set(lora_filenames)
