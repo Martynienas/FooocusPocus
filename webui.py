@@ -1239,30 +1239,34 @@ with shared.gradio_root:
                 def add_checkpoint_folder(folder_path):
                     """Add a checkpoint folder and return updated display and model dropdowns."""
                     if not folder_path or folder_path.strip() == '':
-                        return gr.update(), gr.Info("Please enter a folder path"), gr.update(), gr.update()
+                        return gr.update(), gr.update(), gr.update()
                     
                     success, message, new_folders = modules.config.add_model_folder('path_checkpoints', folder_path.strip())
                     if success:
                         reload_result = modules.config.reload_model_files()
                         new_count = reload_result.get('model_count', 0)
+                        print(f"✓ {message}. Found {new_count} new models.")
                         return (
                             gr.update(value=[[p] for p in new_folders]),
-                            gr.Info(f"✓ {message}. Found {new_count} new models."),
                             gr.update(choices=modules.config.model_filenames),
                             gr.update(choices=['None'] + modules.config.model_filenames)
                         )
                     else:
-                        return gr.update(), gr.Info(f"✗ {message}"), gr.update(), gr.update()
+                        print(f"✗ {message}")
+                        return gr.update(), gr.update(), gr.update()
                 
                 def add_lora_folder(folder_path):
                     """Add a LoRA folder and return updated display."""
                     if not folder_path or folder_path.strip() == '':
-                        return gr.update(), gr.Info("Please enter a folder path")
+                        # Return updates for folder display and all LoRA dropdowns (no change)
+                        lora_updates = [gr.update() for _ in range(len(lora_ctrls))]
+                        return (gr.update(), *lora_updates)
                     
                     success, message, new_folders = modules.config.add_model_folder('path_loras', folder_path.strip())
                     if success:
                         reload_result = modules.config.reload_model_files()
                         new_count = reload_result.get('lora_count', 0)
+                        print(f"✓ {message}. Found {new_count} new LoRAs.")
                         # Return updates for folder display and all LoRA dropdowns
                         lora_updates = []
                         for i in range(modules.config.default_max_lora_number):
@@ -1271,11 +1275,12 @@ with shared.gradio_root:
                             lora_updates.append(gr.update())  # weight slider - no change
                         return (
                             gr.update(value=[[p] for p in new_folders]),
-                            gr.Info(f"✓ {message}. Found {new_count} new LoRAs."),
                             *lora_updates
                         )
                     else:
-                        return gr.update(), gr.Info(f"✗ {message}")
+                        print(f"✗ {message}")
+                        lora_updates = [gr.update() for _ in range(len(lora_ctrls))]
+                        return (gr.update(), *lora_updates)
                 
                 def reset_checkpoint_folders():
                     """Reset checkpoint folders to default."""
