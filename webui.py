@@ -1359,16 +1359,11 @@ with shared.gradio_root:
                     gr.HTML('<h2>Image Library</h2>')
                     close_library_btn = gr.Button('×', variant='secondary', elem_classes=['library-close-btn'], scale=0, min_width=40)
                 
-                gr.HTML('<p style="color: var(--body-text-color-subdued); font-size: 0.9em; margin-bottom: 10px;">Browse, filter, and manage your generated images. Click on an image to view details and load settings.</p>')
-                
+                # Compact filter section
                 with gr.Row():
-                    # Filter section
-                    with gr.Column(scale=1):
-                        library_search = gr.Textbox(label='Search', placeholder='Search by prompt or tags...', elem_id='library_search')
-                        library_tags_filter = gr.Dropdown(label='Filter by Tags', multiselect=True, choices=[], value=[], elem_id='library_tags_filter')
-                        with gr.Row():
-                            library_refresh_btn = gr.Button('🔄 Refresh', variant='secondary')
-                            library_scan_btn = gr.Button('📂 Scan', variant='secondary')
+                    library_search = gr.Textbox(label='Search', placeholder='Search prompts...', elem_id='library_search', scale=2)
+                    library_tags_filter = gr.Dropdown(label='Filter Tags', multiselect=True, choices=[], value=[], elem_id='library_tags_filter', scale=2)
+                    library_refresh_btn = gr.Button('🔄', variant='secondary', scale=0, min_width=50, elem_classes=['library-icon-btn'])
                 
                 # Image gallery and details
                 with gr.Row():
@@ -1854,11 +1849,6 @@ with shared.gradio_root:
         library_refresh_btn.click(
             library_refresh_images,
             inputs=[library_search, library_tags_filter],
-            outputs=[library_gallery, library_tags_filter]
-        )
-        
-        library_scan_btn.click(
-            lambda: library_refresh_images(None, None),
             outputs=[library_gallery, library_tags_filter]
         )
         

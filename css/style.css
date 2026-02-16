@@ -742,14 +742,14 @@ body {
   height: 100vh !important;
   background: rgba(0, 0, 0, 0.85) !important;
   z-index: 9999 !important;
-  padding: 20px !important;
+  padding: 10px !important;
   box-sizing: border-box !important;
 }
 
 /* Flex centering when visible */
 #image_library_modal .gradio-group {
   display: flex !important;
-  align-items: center !important;
+  align-items: stretch !important;
   justify-content: center !important;
   width: 100% !important;
   height: 100% !important;
@@ -761,11 +761,14 @@ body {
   border-radius: 12px !important;
   width: 98vw !important;
   max-width: 98vw !important;
-  max-height: 95vh !important;
-  overflow-y: auto !important;
-  padding: 20px !important;
+  height: calc(100vh - 20px) !important;
+  max-height: calc(100vh - 20px) !important;
+  display: flex !important;
+  flex-direction: column !important;
+  padding: 15px !important;
   box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5) !important;
   border: 1px solid var(--border-color-primary) !important;
+  overflow: hidden !important;
 }
 
 /* Library Modal Header */
@@ -773,23 +776,25 @@ body {
   display: flex !important;
   justify-content: space-between !important;
   align-items: center !important;
-  margin-bottom: 15px !important;
-  padding-bottom: 10px !important;
+  margin-bottom: 10px !important;
+  padding-bottom: 8px !important;
   border-bottom: 1px solid var(--border-color-primary) !important;
+  flex-shrink: 0 !important;
 }
 
 .library-modal-header h2 {
   margin: 0 !important;
   color: var(--body-text-color) !important;
+  font-size: 1.3em !important;
 }
 
 /* Close Button */
 .library-close-btn {
-  width: 40px !important;
-  height: 40px !important;
-  min-width: 40px !important;
+  width: 36px !important;
+  height: 36px !important;
+  min-width: 36px !important;
   border-radius: 50% !important;
-  font-size: 24px !important;
+  font-size: 22px !important;
   line-height: 1 !important;
   padding: 0 !important;
   background: var(--background-fill-secondary) !important;
@@ -802,18 +807,23 @@ body {
   color: white !important;
 }
 
-/* Image Library Tab */
+/* Icon button for refresh */
+.library-icon-btn {
+  min-width: 50px !important;
+  padding: 8px !important;
+  font-size: 1.2em !important;
+}
+
+/* Image Library Gallery - fill available space */
 #library_gallery {
-  min-height: 400px;
+  min-height: 300px !important;
+  flex: 1 !important;
 }
 
-/* Library filter section */
-#library_search {
-  margin-bottom: 10px;
-}
-
+/* Library filter section - compact row */
+#library_search,
 #library_tags_filter {
-  margin-bottom: 15px;
+  margin-bottom: 0 !important;
 }
 
 /* Library gallery thumbnails */
@@ -836,8 +846,8 @@ body {
 
 /* Image metadata display */
 #library_image_info {
-  max-height: 300px;
-  overflow-y: auto;
+  max-height: 200px !important;
+  overflow-y: auto !important;
   font-family: monospace;
   font-size: 0.85em;
 }
