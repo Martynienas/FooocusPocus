@@ -1737,7 +1737,15 @@ with shared.gradio_root:
             """Handle image selection in gallery."""
             if gallery_value and evt.index < len(gallery_value):
                 selected = gallery_value[evt.index]
-                image_path = selected[0] if isinstance(selected, (list, tuple)) else selected
+                # Handle different Gradio Gallery data formats
+                # Newer Gradio: dict with 'image' and 'caption' keys
+                # Older Gradio: tuple/list with (image, caption) or just image path
+                if isinstance(selected, dict):
+                    image_path = selected.get('image', selected.get('name', ''))
+                elif isinstance(selected, (list, tuple)):
+                    image_path = selected[0]
+                else:
+                    image_path = str(selected)
                 
                 from modules.image_library import ImageLibrary
                 lib = ImageLibrary()
