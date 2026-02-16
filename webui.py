@@ -20,7 +20,6 @@ import launch
 from extras.inpaint_mask import SAMOptions
 
 from modules.sdxl_styles import legal_style_names
-from modules.private_logger import get_current_html_path, get_available_logs, get_latest_log
 from modules.ui_gradio_extensions import reload_javascript
 from modules.auth import auth_enabled, check_auth
 from modules.util import is_json
@@ -628,36 +627,8 @@ with shared.gradio_root:
                 seed_random.change(random_checked, inputs=[seed_random], outputs=[image_seed],
                                    queue=False, show_progress=False)
 
-                def update_history_link():
-                    if args_manager.args.disable_image_log:
-                        return gr.update(value='')
-
-                    # Try to find latest existing log.html; fall back to the generated current path
-                    latest = get_latest_log()
-                    if latest is None:
-                        # use generated (may be non-existent) path so behavior is preserved
-                        href = get_current_html_path(output_format)
-                    else:
-                        href = latest
-
-                    return gr.update(value=f'<a href="file={href}" target="_blank">\U0001F4DA History Log</a>')
-
                 # Image Library button replaces history log
                 open_library_btn = gr.Button('📚 Image Library', variant='secondary', elem_id='open_library_btn', elem_classes=['open-library-btn'])
-                # state to hold available logs and currently selected index
-                history_logs = gr.State([])
-                history_index = gr.State(0)
-
-                def load_history_state():
-                    if args_manager.args.disable_image_log:
-                        return gr.update(), [] , 0
-                    logs = get_available_logs()
-                    idx = len(logs) - 1 if len(logs) > 0 else 0
-                    # return HTML value, logs list and index
-                    href = logs[idx] if logs else get_current_html_path(output_format)
-                    return gr.update(value=f'<a href="file={href}" target="_blank">\U0001F4DA History Log</a>'), logs, idx
-
-                # History navigation removed - replaced with Image Library button
 
             with gr.Tab(label='Styles', elem_classes=['style_selections_tab']):
                 style_sorter.try_load_sorted_styles(
@@ -2057,7 +2028,6 @@ with shared.gradio_root:
             .then(fn=generate_clicked, inputs=currentTask, outputs=[progress_html, progress_window, progress_gallery, gallery]) \
             .then(lambda: (gr.update(visible=True, interactive=True), gr.update(visible=False, interactive=False), gr.update(visible=False, interactive=False), False),
                   outputs=[generate_button, stop_button, skip_button, state_is_generating]) \
-            .then(fn=update_history_link, outputs=history_link) \
             .then(fn=lambda: None, _js='playNotification').then(fn=lambda: None, _js='refresh_grid_delayed')
 
         reset_button.click(lambda: [worker.AsyncTask(args=[]), False, gr.update(visible=True, interactive=True)] +
