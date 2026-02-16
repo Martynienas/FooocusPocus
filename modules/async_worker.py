@@ -158,6 +158,9 @@ class AsyncTask:
         self.images_to_enhance_count = 0
         self.enhance_stats = {}
 
+        # Tags for image organization
+        self.tags = args.pop() if len(args) > 0 else ''
+
 async_tasks = []
 
 
@@ -386,8 +389,14 @@ def worker():
                                          task['log_negative_prompt'], task['negative'],
                                          async_task.steps, async_task.base_model_name, async_task.refiner_model_name,
                                          loras, async_task.vae_name)
+                # Set tags if provided
+                if hasattr(async_task, 'tags') and async_task.tags:
+                    metadata_parser.set_tags(async_task.tags)
             d.append(('Metadata Scheme', 'metadata_scheme',
                       async_task.metadata_scheme.value if async_task.save_metadata_to_images else async_task.save_metadata_to_images))
+            # Add tags to metadata display
+            if hasattr(async_task, 'tags') and async_task.tags:
+                d.append(('Tags', 'tags', async_task.tags))
             d.append(('Version', 'version', 'Fooocus v' + fooocus_version.version))
             img_paths.append(log(x, d, metadata_parser, async_task.output_format, task, persist_image))
 

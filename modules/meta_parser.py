@@ -318,6 +318,14 @@ class MetadataParser(ABC):
                 self.loras.append((Path(lora_name).stem, lora_weight, lora_hash))
         self.vae_name = Path(vae_name).stem
 
+    def set_tags(self, tags: str):
+        """Set tags for the image metadata.
+        
+        Args:
+            tags: Comma-separated string of tags
+        """
+        self.tags = tags
+
 
 class A1111MetadataParser(MetadataParser):
     def get_scheme(self) -> MetadataScheme:
@@ -562,6 +570,13 @@ class FooocusMetadataParser(MetadataParser):
 
         res['vae'] = self.vae_name
         res['loras'] = self.loras
+
+        # Include tags if present in metadata
+        if 'tags' in res and res['tags']:
+            # Tags are already in the correct format
+            pass
+        elif hasattr(self, 'tags') and self.tags:
+            res['tags'] = self.tags
 
         if modules.config.metadata_created_by != '':
             res['created_by'] = modules.config.metadata_created_by
