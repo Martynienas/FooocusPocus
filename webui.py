@@ -1719,7 +1719,7 @@ with shared.gradio_root:
             
             # Filter by search text
             if search_text:
-                images = lib.filter_images(images, search_text=search_text)
+                images = lib.filter_images(images, search=search_text)
             
             # Filter by tags
             if filter_tags:
