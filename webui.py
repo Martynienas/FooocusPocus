@@ -1759,7 +1759,19 @@ with shared.gradio_root:
                 output_path.change(lambda v: auto_save_config('path_outputs', v), inputs=[output_path])
                 temp_path_config.change(lambda v: auto_save_config('temp_path', v), inputs=[temp_path_config])
                 temp_cleanup.change(lambda v: auto_save_config('temp_path_cleanup_on_launch', v), inputs=[temp_cleanup])
-            
+        
+        state_is_generating = gr.State(False)
+
+        load_data_outputs = [advanced_checkbox, image_number, prompt, negative_prompt, style_selections,
+                             steps_slider, upscale_steps_slider, overwrite_step, overwrite_switch, aspect_ratios_selection,
+                             overwrite_width, overwrite_height, guidance_scale, sharpness, adm_scaler_positive,
+                             adm_scaler_negative, adm_scaler_end, refiner_swap_method, adaptive_cfg, clip_skip,
+                             base_model, refiner_model, refiner_switch, sampler_name, scheduler_name, vae_name,
+                             seed_random, image_seed, inpaint_engine, inpaint_engine_state,
+                             inpaint_mode] + enhance_inpaint_mode_ctrls + [generate_button,
+                             load_parameter_button] + freeu_ctrls + lora_ctrls
+
+        with block:
             # =========================================================================
             # Image Library Event Handlers
             # =========================================================================
@@ -1904,17 +1916,6 @@ with shared.gradio_root:
                 inputs=[library_search, library_tags_filter],
                 outputs=[library_gallery, library_tags_filter]
             )
-
-        state_is_generating = gr.State(False)
-
-        load_data_outputs = [advanced_checkbox, image_number, prompt, negative_prompt, style_selections,
-                             steps_slider, upscale_steps_slider, overwrite_step, overwrite_switch, aspect_ratios_selection,
-                             overwrite_width, overwrite_height, guidance_scale, sharpness, adm_scaler_positive,
-                             adm_scaler_negative, adm_scaler_end, refiner_swap_method, adaptive_cfg, clip_skip,
-                             base_model, refiner_model, refiner_switch, sampler_name, scheduler_name, vae_name,
-                             seed_random, image_seed, inpaint_engine, inpaint_engine_state,
-                             inpaint_mode] + enhance_inpaint_mode_ctrls + [generate_button,
-                             load_parameter_button] + freeu_ctrls + lora_ctrls
 
         if not args_manager.args.disable_preset_selection:
             def preset_selection_change(preset, is_generating, inpaint_mode):
