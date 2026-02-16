@@ -1366,17 +1366,19 @@ with shared.gradio_root:
                         # Filter section
                         library_search = gr.Textbox(label='Search', placeholder='Search prompts...', elem_id='library_search')
                         library_tags_filter = gr.Dropdown(label='Filter Tags', multiselect=True, choices=[], value=[], elem_id='library_tags_filter')
-                        library_refresh_btn = gr.Button('🔄 Refresh', variant='secondary', elem_classes=['library-refresh-btn'])
+                        with gr.Row():
+                            library_refresh_btn = gr.Button('🔄 Refresh', variant='secondary', scale=1)
+                            library_column_slider = gr.Slider(minimum=2, maximum=6, value=3, step=1, label='Columns', elem_id='library_column_slider', scale=0, min_width=100)
                         
-                        # Gallery
+                        # Gallery - columns will be updated by slider
                         library_gallery = gr.Gallery(label='Generated Images', show_label=False, elem_id='library_gallery', columns=3, rows=4, object_fit='contain', height='auto')
                     
                     # Right panel: Preview and metadata
                     with gr.Column(scale=1, elem_classes=['library-right-panel']):
-                        # Image preview
+                        # Image preview - constrained height
                         library_selected_image = gr.Image(label='Selected Image', type='filepath', interactive=False, elem_id='library_preview_image')
                         
-                        # Metadata
+                        # Metadata - scrollable
                         library_image_info = gr.JSON(label='Image Metadata', visible=True, elem_id='library_image_info')
                         
                         # Action buttons
@@ -1855,6 +1857,13 @@ with shared.gradio_root:
             library_refresh_images,
             inputs=[library_search, library_tags_filter],
             outputs=[library_gallery, library_tags_filter]
+        )
+        
+        # Column slider updates gallery columns
+        library_column_slider.change(
+            lambda cols: gr.update(columns=int(cols)),
+            inputs=[library_column_slider],
+            outputs=[library_gallery]
         )
         
         library_gallery.select(
