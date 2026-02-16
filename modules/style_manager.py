@@ -58,7 +58,7 @@ def normalize_style_name(name):
 
 
 def is_user_style(style_name):
-    """Check if a style is a user-defined style."""
+    """Check if a style is a user-defined style (exists in user styles file)."""
     user_styles = load_user_styles()
     for style in user_styles:
         if normalize_style_name(style.get('name', '')) == style_name:
@@ -67,8 +67,7 @@ def is_user_style(style_name):
 
 
 def is_system_style(style_name):
-    """Check if a style is a system style (cannot be deleted)."""
-    # System styles are those from the default style files
+    """Check if a style originates from a system style file."""
     system_files = [
         'sdxl_styles_fooocus.json',
         'sdxl_styles_sai.json',
@@ -93,106 +92,62 @@ def is_system_style(style_name):
     return False
 
 
-def create_style(name, prompt='', negative_prompt=''):
-    """Create a new user-defined style."""
+def is_overridden_system_style(style_name):
+    """Check if a system style is overridden by a user style with the same name."""
+    return is_system_style(style_name) and is_user_style(style_name)
+
+
+def save_style(name, prompt='', negative_prompt=''):
+    """Save a style (create new or update existing). 
+    User styles with same name as system styles will override/hide them."""
     if not name or not name.strip():
         return False, "Style name cannot be empty!"
     
     name = name.strip()
     normalized_name = normalize_style_name(name)
     
-    # Check if style already exists
-    if normalized_name in sdxl_styles.styles:
-        return False, f"Style '{normalized_name}' already exists!"
-    
     # Load existing user styles
     user_styles = load_user_styles()
     
-    # Add new style
-    new_style = {
-        'name': name,
-        'prompt': prompt,
-        'negative_prompt': negative_prompt
-    }
-    user_styles.append(new_style)
-    
-    # Save user styles
-    success, message = save_user_styles(user_styles)
-    if success:
-        # Reload styles
-        reload_styles()
-        return True, f"Style '{normalized_name}' created successfully!"
-    return False, message
-
-
-def update_style(old_name, new_name, prompt='', negative_prompt=''):
-    """Update an existing user-defined style."""
-    if not new_name or not new_name.strip():
-        return False, "Style name cannot be empty!"
-    
-    old_name = old_name.strip()
-    new_name = new_name.strip()
-    normalized_old = normalize_style_name(old_name)
-    normalized_new = normalize_style_name(new_name)
-    
-    # Check if old style exists
-    if normalized_old not in sdxl_styles.styles:
-        return False, f"Style '{normalized_old}' does not exist!"
-    
-    # Check if trying to update a system style
-    if is_system_style(normalized_old):
-        return False, f"Cannot modify system style '{normalized_old}'!"
-    
-    # Load user styles
-    user_styles = load_user_styles()
-    
-    # Find and update the style
-    found = False
+    # Check if this is an update to an existing user style
+    existing_index = None
     for i, style in enumerate(user_styles):
-        if normalize_style_name(style.get('name', '')) == normalized_old:
-            user_styles[i] = {
-                'name': new_name,
-                'prompt': prompt,
-                'negative_prompt': negative_prompt
-            }
-            found = True
+        if normalize_style_name(style.get('name', '')) == normalized_name:
+            existing_index = i
             break
     
-    if not found:
-        # Style might exist but not in user styles file, add it
+    if existing_index is not None:
+        # Update existing user style
+        user_styles[existing_index] = {
+            'name': name,
+            'prompt': prompt,
+            'negative_prompt': negative_prompt
+        }
+    else:
+        # Add new style (may override system style with same name)
         user_styles.append({
-            'name': new_name,
+            'name': name,
             'prompt': prompt,
             'negative_prompt': negative_prompt
         })
     
-    # If renaming, check if new name already exists
-    if normalized_old != normalized_new and normalized_new in sdxl_styles.styles:
-        return False, f"Style '{normalized_new}' already exists!"
-    
     # Save user styles
     success, message = save_user_styles(user_styles)
     if success:
-        # Reload styles
         reload_styles()
-        return True, f"Style '{normalized_old}' updated to '{normalized_new}' successfully!"
+        if existing_index is not None:
+            return True, f"Style '{normalized_name}' updated successfully!"
+        else:
+            return True, f"Style '{normalized_name}' created successfully!"
     return False, message
 
 
 def delete_style(style_name):
-    """Delete a user-defined style."""
+    """Delete a user-defined style. This will reveal the system style if it was overridden."""
     if not style_name:
         return False, "No style selected!"
     
     normalized_name = normalize_style_name(style_name)
-    
-    # Check if style exists
-    if normalized_name not in sdxl_styles.styles:
-        return False, f"Style '{normalized_name}' does not exist!"
-    
-    # Check if trying to delete a system style
-    if is_system_style(normalized_name):
-        return False, f"Cannot delete system style '{normalized_name}'!"
     
     # Check if it's Fooocus V2 or Random Style
     if normalized_name in ['Fooocus V2', 'Random Style']:
@@ -201,20 +156,32 @@ def delete_style(style_name):
     # Load user styles
     user_styles = load_user_styles()
     
-    # Remove the style
+    # Check if this is a user style
+    is_user = False
+    for style in user_styles:
+        if normalize_style_name(style.get('name', '')) == normalized_name:
+            is_user = True
+            break
+    
+    if not is_user:
+        return False, f"Style '{normalized_name}' is not a user style and cannot be deleted!"
+    
+    # Remove the style from user styles
     user_styles = [s for s in user_styles if normalize_style_name(s.get('name', '')) != normalized_name]
     
     # Save user styles
     success, message = save_user_styles(user_styles)
     if success:
-        # Reload styles
         reload_styles()
+        # Check if a system style will be revealed
+        if is_system_style(normalized_name):
+            return True, f"User style '{normalized_name}' deleted. System style is now visible!"
         return True, f"Style '{normalized_name}' deleted successfully!"
     return False, message
 
 
 def reload_styles():
-    """Reload all styles from files."""
+    """Reload all styles from files. User styles override system styles with same name."""
     # Clear existing styles
     sdxl_styles.styles.clear()
     
@@ -222,23 +189,31 @@ def reload_styles():
     styles_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../sdxl_styles/'))
     styles_files = get_files_from_folder(styles_path, ['.json'])
     
-    # Order: load user styles last so they can override
-    for x in ['sdxl_styles_fooocus.json',
-              'sdxl_styles_sai.json',
-              'sdxl_styles_mre.json',
-              'sdxl_styles_twri.json',
-              'sdxl_styles_diva.json',
-              'sdxl_styles_marc_k3nt3l.json']:
-        if x in styles_files:
-            styles_files.remove(x)
-            styles_files.append(x)
+    # Order: load system styles first, then user styles last so they override
+    system_files = [
+        'sdxl_styles_fooocus.json',
+        'sdxl_styles_sai.json',
+        'sdxl_styles_mre.json',
+        'sdxl_styles_twri.json',
+        'sdxl_styles_diva.json',
+        'sdxl_styles_marc_k3nt3l.json'
+    ]
     
-    # Move user styles to the end
+    # Sort: system files first, then others, user file last
+    ordered_files = []
+    for sf in system_files:
+        if sf in styles_files:
+            ordered_files.append(sf)
+    
+    for sf in styles_files:
+        if sf not in ordered_files and sf != 'sdxl_styles_user.json':
+            ordered_files.append(sf)
+    
+    # User file last to override system styles
     if 'sdxl_styles_user.json' in styles_files:
-        styles_files.remove('sdxl_styles_user.json')
-        styles_files.append('sdxl_styles_user.json')
+        ordered_files.append('sdxl_styles_user.json')
     
-    for styles_file in styles_files:
+    for styles_file in ordered_files:
         try:
             with open(os.path.join(styles_path, styles_file), encoding='utf-8') as f:
                 for entry in json.load(f):
