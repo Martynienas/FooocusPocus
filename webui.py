@@ -1771,151 +1771,150 @@ with shared.gradio_root:
                              inpaint_mode] + enhance_inpaint_mode_ctrls + [generate_button,
                              load_parameter_button] + freeu_ctrls + lora_ctrls
 
-        with block:
-            # =========================================================================
-            # Image Library Event Handlers
-            # =========================================================================
+        # =========================================================================
+        # Image Library Event Handlers
+        # =========================================================================
+        
+        def library_refresh_images(search_text=None, filter_tags=None):
+            """Refresh the image library gallery."""
+            from modules.image_library import ImageLibrary
+            lib = ImageLibrary()
+            images = lib.scan_images()
             
-            def library_refresh_images(search_text=None, filter_tags=None):
-                """Refresh the image library gallery."""
-                from modules.image_library import ImageLibrary
-                lib = ImageLibrary()
-                images = lib.scan_images()
-                
-                # Filter by search text
-                if search_text:
-                    images = lib.filter_images(images, search_text=search_text)
-                
-                # Filter by tags
-                if filter_tags:
-                    images = lib.filter_images(images, tags=filter_tags)
-                
-                # Get all available tags for dropdown
-                all_tags = lib.get_all_tags()
-                
-                # Return gallery images and tag choices
-                gallery_images = [[img['path'], img.get('name', '')] for img in images]
-                return gr.update(value=gallery_images), gr.update(choices=all_tags)
+            # Filter by search text
+            if search_text:
+                images = lib.filter_images(images, search_text=search_text)
             
-            def library_on_image_select(evt: gr.SelectData, gallery_value):
-                """Handle image selection in gallery."""
-                if gallery_value and evt.index < len(gallery_value):
-                    selected = gallery_value[evt.index]
-                    image_path = selected[0] if isinstance(selected, (list, tuple)) else selected
-                    
-                    from modules.image_library import ImageLibrary
-                    lib = ImageLibrary()
-                    info = lib.get_image_info(image_path)
-                    
-                    # Get current tags
-                    current_tags = info.get('tags', '') if info else ''
-                    
-                    return (
-                        gr.update(value=image_path),
-                        info,
-                        gr.update(visible=True),
-                        gr.update(visible=True),
-                        gr.update(visible=True, value=current_tags),
-                        gr.update(visible=True),
-                        image_path
-                    )
-                return gr.update(), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), None
+            # Filter by tags
+            if filter_tags:
+                images = lib.filter_images(images, tags=filter_tags)
             
-            def library_load_settings(image_info):
-                """Load settings from selected image to the generator."""
-                if not image_info:
-                    return [gr.update()] * len(load_data_outputs)
-                
-                # Convert image info to parameters format
-                import json
-                params = json.dumps(image_info) if isinstance(image_info, dict) else image_info
-                
-                return modules.meta_parser.load_parameter_button_click(params, False, inpaint_mode_state=None)
+            # Get all available tags for dropdown
+            all_tags = lib.get_all_tags()
             
-            def library_save_tags(image_path, new_tags):
-                """Save tags to the selected image."""
-                if not image_path:
-                    return gr.update()
+            # Return gallery images and tag choices
+            gallery_images = [[img['path'], img.get('name', '')] for img in images]
+            return gr.update(value=gallery_images), gr.update(choices=all_tags)
+        
+        def library_on_image_select(evt: gr.SelectData, gallery_value):
+            """Handle image selection in gallery."""
+            if gallery_value and evt.index < len(gallery_value):
+                selected = gallery_value[evt.index]
+                image_path = selected[0] if isinstance(selected, (list, tuple)) else selected
                 
                 from modules.image_library import ImageLibrary
                 lib = ImageLibrary()
-                success = lib.update_image_tags(image_path, new_tags)
+                info = lib.get_image_info(image_path)
                 
-                if success:
-                    # Refresh tags dropdown
-                    all_tags = lib.get_all_tags()
-                    return gr.update(choices=all_tags)
+                # Get current tags
+                current_tags = info.get('tags', '') if info else ''
+                
+                return (
+                    gr.update(value=image_path),
+                    info,
+                    gr.update(visible=True),
+                    gr.update(visible=True),
+                    gr.update(visible=True, value=current_tags),
+                    gr.update(visible=True),
+                    image_path
+                )
+            return gr.update(), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), None
+        
+        def library_load_settings(image_info):
+            """Load settings from selected image to the generator."""
+            if not image_info:
+                return [gr.update()] * len(load_data_outputs)
+            
+            # Convert image info to parameters format
+            import json
+            params = json.dumps(image_info) if isinstance(image_info, dict) else image_info
+            
+            return modules.meta_parser.load_parameter_button_click(params, False, inpaint_mode_state=None)
+        
+        def library_save_tags(image_path, new_tags):
+            """Save tags to the selected image."""
+            if not image_path:
                 return gr.update()
             
-            def library_delete_image(image_path):
-                """Delete the selected image."""
-                if not image_path:
-                    return gr.update(), gr.update()
-                
-                from modules.image_library import ImageLibrary
-                lib = ImageLibrary()
-                success = lib.delete_image(image_path)
-                
-                if success:
-                    # Refresh gallery
-                    images = lib.scan_images()
-                    gallery_images = [[img['path'], img.get('name', '')] for img in images]
-                    return (
-                        gr.update(value=gallery_images),
-                        gr.update(value=None),
-                        None
-                    )
-                return gr.update(), gr.update(), image_path
+            from modules.image_library import ImageLibrary
+            lib = ImageLibrary()
+            success = lib.update_image_tags(image_path, new_tags)
             
-            # Wire up Image Library events
-            library_refresh_btn.click(
-                library_refresh_images,
-                inputs=[library_search, library_tags_filter],
-                outputs=[library_gallery, library_tags_filter]
-            )
+            if success:
+                # Refresh tags dropdown
+                all_tags = lib.get_all_tags()
+                return gr.update(choices=all_tags)
+            return gr.update()
+        
+        def library_delete_image(image_path):
+            """Delete the selected image."""
+            if not image_path:
+                return gr.update(), gr.update()
             
-            library_scan_btn.click(
-                lambda: library_refresh_images(None, None),
-                outputs=[library_gallery, library_tags_filter]
-            )
+            from modules.image_library import ImageLibrary
+            lib = ImageLibrary()
+            success = lib.delete_image(image_path)
             
-            library_gallery.select(
-                library_on_image_select,
-                inputs=[library_gallery],
-                outputs=[library_selected_image, library_image_info, library_load_settings_btn, 
-                         library_delete_btn, library_edit_tags, library_save_tags_btn, library_selected_path]
-            )
-            
-            library_load_settings_btn.click(
-                library_load_settings,
-                inputs=[library_image_info],
-                outputs=load_data_outputs
-            )
-            
-            library_save_tags_btn.click(
-                library_save_tags,
-                inputs=[library_selected_path, library_edit_tags],
-                outputs=[library_tags_filter]
-            )
-            
-            library_delete_btn.click(
-                library_delete_image,
-                inputs=[library_selected_path],
-                outputs=[library_gallery, library_selected_image, library_selected_path]
-            )
-            
-            # Search and filter events
-            library_search.submit(
-                library_refresh_images,
-                inputs=[library_search, library_tags_filter],
-                outputs=[library_gallery, library_tags_filter]
-            )
-            
-            library_tags_filter.change(
-                library_refresh_images,
-                inputs=[library_search, library_tags_filter],
-                outputs=[library_gallery, library_tags_filter]
-            )
+            if success:
+                # Refresh gallery
+                images = lib.scan_images()
+                gallery_images = [[img['path'], img.get('name', '')] for img in images]
+                return (
+                    gr.update(value=gallery_images),
+                    gr.update(value=None),
+                    None
+                )
+            return gr.update(), gr.update(), image_path
+        
+        # Wire up Image Library events
+        library_refresh_btn.click(
+            library_refresh_images,
+            inputs=[library_search, library_tags_filter],
+            outputs=[library_gallery, library_tags_filter]
+        )
+        
+        library_scan_btn.click(
+            lambda: library_refresh_images(None, None),
+            outputs=[library_gallery, library_tags_filter]
+        )
+        
+        library_gallery.select(
+            library_on_image_select,
+            inputs=[library_gallery],
+            outputs=[library_selected_image, library_image_info, library_load_settings_btn, 
+                     library_delete_btn, library_edit_tags, library_save_tags_btn, library_selected_path]
+        )
+        
+        library_load_settings_btn.click(
+            library_load_settings,
+            inputs=[library_image_info],
+            outputs=load_data_outputs
+        )
+        
+        library_save_tags_btn.click(
+            library_save_tags,
+            inputs=[library_selected_path, library_edit_tags],
+            outputs=[library_tags_filter]
+        )
+        
+        library_delete_btn.click(
+            library_delete_image,
+            inputs=[library_selected_path],
+            outputs=[library_gallery, library_selected_image, library_selected_path]
+        )
+        
+        # Search and filter events
+        library_search.submit(
+            library_refresh_images,
+            inputs=[library_search, library_tags_filter],
+            outputs=[library_gallery, library_tags_filter]
+        )
+        
+        library_tags_filter.change(
+            library_refresh_images,
+            inputs=[library_search, library_tags_filter],
+            outputs=[library_gallery, library_tags_filter]
+        )
 
         if not args_manager.args.disable_preset_selection:
             def preset_selection_change(preset, is_generating, inpaint_mode):
