@@ -1359,22 +1359,27 @@ with shared.gradio_root:
                     gr.HTML('<h2>Image Library</h2>')
                     close_library_btn = gr.Button('×', variant='secondary', elem_classes=['library-close-btn'], scale=0, min_width=40)
                 
-                # Compact filter section
+                # Main content: Left panel for navigation, Right panel for preview
                 with gr.Row():
-                    library_search = gr.Textbox(label='Search', placeholder='Search prompts...', elem_id='library_search', scale=2)
-                    library_tags_filter = gr.Dropdown(label='Filter Tags', multiselect=True, choices=[], value=[], elem_id='library_tags_filter', scale=2)
-                    library_refresh_btn = gr.Button('🔄', variant='secondary', scale=0, min_width=50, elem_classes=['library-icon-btn'])
-                
-                # Image gallery and details
-                with gr.Row():
-                    with gr.Column(scale=2):
-                        library_gallery = gr.Gallery(label='Generated Images', show_label=False, elem_id='library_gallery', columns=4, rows=3, object_fit='contain', height='auto')
-                    
-                    with gr.Column(scale=1):
-                        # Image details panel
-                        library_selected_image = gr.Image(label='Selected Image', type='filepath', interactive=False)
-                        library_image_info = gr.JSON(label='Image Metadata', visible=True)
+                    # Left panel: Navigation and gallery
+                    with gr.Column(scale=1, elem_classes=['library-left-panel']):
+                        # Filter section
+                        library_search = gr.Textbox(label='Search', placeholder='Search prompts...', elem_id='library_search')
+                        library_tags_filter = gr.Dropdown(label='Filter Tags', multiselect=True, choices=[], value=[], elem_id='library_tags_filter')
+                        library_refresh_btn = gr.Button('🔄 Refresh', variant='secondary', elem_classes=['library-refresh-btn'])
                         
+                        # Gallery
+                        library_gallery = gr.Gallery(label='Generated Images', show_label=False, elem_id='library_gallery', columns=3, rows=4, object_fit='contain', height='auto')
+                    
+                    # Right panel: Preview and metadata
+                    with gr.Column(scale=1, elem_classes=['library-right-panel']):
+                        # Image preview
+                        library_selected_image = gr.Image(label='Selected Image', type='filepath', interactive=False, elem_id='library_preview_image')
+                        
+                        # Metadata
+                        library_image_info = gr.JSON(label='Image Metadata', visible=True, elem_id='library_image_info')
+                        
+                        # Action buttons
                         with gr.Row():
                             library_load_settings_btn = gr.Button('📋 Load Settings', variant='primary', visible=False)
                             library_delete_btn = gr.Button('🗑️ Delete', variant='stop', visible=False)
