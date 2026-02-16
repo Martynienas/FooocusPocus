@@ -610,3 +610,115 @@ body {
   padding-top: 15px;
   border-top: 1px solid var(--border-color-primary);
 }
+
+/* =============================================================================
+   Style Manager Styles
+   ============================================================================= */
+
+/* Modify Styles button */
+.modify-styles-btn {
+  margin-top: 10px;
+  width: 100%;
+}
+
+/* Style Editor Panel */
+.style-editor-panel {
+  margin-top: 15px;
+  padding: 15px;
+  border: 1px solid var(--border-color-primary);
+  border-radius: 8px;
+  background: var(--background-fill-secondary);
+}
+
+.style-editor-panel h4 {
+  margin-top: 0;
+  margin-bottom: 15px;
+  color: var(--body-text-color);
+  font-size: 1em;
+}
+
+/* Style editor dropdown */
+.style-editor-panel .gradio-dropdown {
+  margin-bottom: 10px;
+}
+
+/* Style editor textboxes */
+.style-editor-panel textarea {
+  font-family: monospace;
+  font-size: 0.9em;
+}
+
+/* Style type indicator */
+.style-editor-panel .style-type-indicator {
+  margin-bottom: 10px;
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 0.85em;
+}
+
+/* Style type badges */
+.style-type-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.8em;
+  font-weight: 500;
+  margin-left: 8px;
+}
+
+.style-type-system {
+  background: var(--background-fill-tertiary);
+  color: var(--body-text-color);
+}
+
+.style-type-user {
+  background: var(--color-accent);
+  color: white;
+}
+
+/* Style list container */
+.style-list-container {
+  max-height: 400px;
+  overflow-y: auto;
+  padding-right: 5px;
+}
+
+/* Style item in list */
+.style-item {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  margin-bottom: 4px;
+  background: var(--background-fill-primary);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.style-item:hover {
+  background: var(--background-fill-secondary);
+}
+
+.style-item.selected {
+  background: var(--background-fill-tertiary);
+  border-left: 3px solid var(--color-accent);
+}
+
+.style-item-name {
+  flex: 1;
+  font-weight: 500;
+}
+
+.style-item-type {
+  font-size: 0.75em;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: var(--background-fill-tertiary);
+}
+
+/* Prompt template highlight */
+.prompt-template-highlight {
+  background: rgba(255, 193, 7, 0.3);
+  padding: 0 2px;
+  border-radius: 2px;
+}
