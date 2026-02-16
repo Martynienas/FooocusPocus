@@ -657,7 +657,7 @@ default_save_only_final_enhanced_image = get_config_item_or_set_default(
 )
 default_save_metadata_to_images = get_config_item_or_set_default(
     key='default_save_metadata_to_images',
-    default_value=False,
+    default_value=True,
     validator=lambda x: isinstance(x, bool),
     expected_type=bool
 )
@@ -672,6 +672,12 @@ metadata_created_by = get_config_item_or_set_default(
     default_value='',
     validator=lambda x: isinstance(x, str),
     expected_type=str
+)
+default_image_library_auto_load = get_config_item_or_set_default(
+    key='default_image_library_auto_load',
+    default_value=True,
+    validator=lambda x: isinstance(x, bool),
+    expected_type=bool
 )
 
 example_inpaint_prompts = [[x] for x in example_inpaint_prompts]
@@ -1093,7 +1099,7 @@ DEFAULT_CONFIG = {
     'default_inpaint_engine_version': 'v2.6',
     
     # Additional settings
-    'default_save_metadata_to_images': False,
+    'default_save_metadata_to_images': True,
     'default_metadata_scheme': MetadataScheme.FOOOCUS.value,
     'default_black_out_nsfw': False,
     'default_save_only_final_enhanced_image': False,
@@ -1101,6 +1107,7 @@ DEFAULT_CONFIG = {
     'default_overwrite_switch': -1,
     'default_overwrite_upscale': -1,
     'temp_path_cleanup_on_launch': True,
+    'default_image_library_auto_load': True,
     
     # Downloads
     'checkpoint_downloads': {},

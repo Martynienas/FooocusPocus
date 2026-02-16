@@ -1367,7 +1367,8 @@ with shared.gradio_root:
                         library_search = gr.Textbox(label='Search', placeholder='Search prompts...', elem_id='library_search')
                         library_tags_filter = gr.Dropdown(label='Filter Tags', multiselect=True, choices=[], value=[], elem_id='library_tags_filter')
                         with gr.Row():
-                            library_refresh_btn = gr.Button('🔄 Refresh', variant='secondary', scale=1)
+                            library_refresh_btn = gr.Button('🔄 Refresh', variant='secondary', scale=0, min_width=100)
+                            library_auto_load = gr.Checkbox(label='Auto-reload on open', value=modules.config.default_image_library_auto_load, scale=1)
                             library_column_slider = gr.Slider(minimum=2, maximum=6, value=3, step=1, label='Columns', elem_id='library_column_slider', scale=0, min_width=100)
                         
                         # Gallery - columns will be updated by slider
@@ -1688,6 +1689,7 @@ with shared.gradio_root:
         config_save_metadata.change(lambda v: auto_save_config('default_save_metadata_to_images', v), inputs=[config_save_metadata])
         config_metadata_scheme.change(lambda v: auto_save_config('default_metadata_scheme', v), inputs=[config_metadata_scheme])
         config_blackout_nsfw.change(lambda v: auto_save_config('default_black_out_nsfw', v), inputs=[config_blackout_nsfw])
+        library_auto_load.change(lambda v: auto_save_config('default_image_library_auto_load', v), inputs=[library_auto_load])
         
         # Wire auto-save for path settings
         embeddings_path.change(lambda v: auto_save_config('path_embeddings', v), inputs=[embeddings_path])
@@ -1843,13 +1845,19 @@ with shared.gradio_root:
             return gr.update(), gr.update(), image_path
         
         # Modal open/close handlers
-        def open_library_modal():
-            return gr.update(visible=True)
+        def open_library_modal(auto_load):
+            if auto_load:
+                from modules.image_library import ImageLibrary
+                lib = ImageLibrary()
+                images = lib.get_all_images()
+                tags = lib.get_all_tags()
+                return gr.update(visible=True), gr.update(value=images), gr.update(choices=tags)
+            return gr.update(visible=True), gr.update(), gr.update()
         
         def close_library_modal():
             return gr.update(visible=False)
         
-        open_library_btn.click(open_library_modal, outputs=[library_modal])
+        open_library_btn.click(open_library_modal, inputs=[library_auto_load], outputs=[library_modal, library_gallery, library_tags_filter])
         close_library_btn.click(close_library_modal, outputs=[library_modal])
         
         # Wire up Image Library events
