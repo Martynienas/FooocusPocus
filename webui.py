@@ -700,33 +700,35 @@ with shared.gradio_root:
                     style_names=legal_style_names,
                     default_selected=modules.config.default_styles)
 
-                style_search_bar = gr.Textbox(show_label=False, container=False,
-                                              placeholder="\U0001F50E Type here to search styles ...",
-                                              value="",
-                                              label='Search Styles')
-                style_selections = gr.CheckboxGroup(show_label=False, container=False,
-                                                    choices=copy.deepcopy(style_sorter.all_styles),
-                                                    value=copy.deepcopy(modules.config.default_styles),
-                                                    label='Selected Styles',
-                                                    elem_classes=['style_selections'])
-                gradio_receiver_style_selections = gr.Textbox(elem_id='gradio_receiver_style_selections', visible=False)
+                # Style Selection Panel (visible by default)
+                with gr.Group(visible=True, elem_classes=['style-selection-panel']) as style_selection_panel:
+                    style_search_bar = gr.Textbox(show_label=False, container=False,
+                                                  placeholder="\U0001F50E Type here to search styles ...",
+                                                  value="",
+                                                  label='Search Styles')
+                    style_selections = gr.CheckboxGroup(show_label=False, container=False,
+                                                        choices=copy.deepcopy(style_sorter.all_styles),
+                                                        value=copy.deepcopy(modules.config.default_styles),
+                                                        label='Selected Styles',
+                                                        elem_classes=['style_selections'])
+                    gradio_receiver_style_selections = gr.Textbox(elem_id='gradio_receiver_style_selections', visible=False)
+                    
+                    # Modify Styles button
+                    modify_styles_btn = gr.Button('\U0001f4dd Modify Styles', variant='secondary', elem_classes=['modify-styles-btn'])
                 
-                # Modify Styles button
-                modify_styles_btn = gr.Button('\U0001f4dd Modify Styles', variant='secondary', elem_classes=['modify-styles-btn'])
-                
-                # Style Editor Panel (hidden by default)
+                # Style Editor Panel (hidden by default, replaces selection panel)
                 with gr.Group(visible=False, elem_classes=['style-editor-panel']) as style_editor_panel:
                     gr.HTML("<h4>Style Editor</h4>")
                     
+                    style_editor_dropdown = gr.Dropdown(
+                        label='Select Style',
+                        choices=style_manager.get_styles_for_dropdown(),
+                        interactive=True
+                    )
+                    
                     with gr.Row():
-                        style_editor_dropdown = gr.Dropdown(
-                            label='Select Style',
-                            choices=style_manager.get_styles_for_dropdown(),
-                            interactive=True,
-                            scale=2
-                        )
-                        style_editor_new_btn = gr.Button('\U0001f4dd New', variant='primary', size='sm', scale=1)
-                        style_editor_close_btn = gr.Button('\u2716 Close', variant='secondary', size='sm', scale=1)
+                        style_editor_new_btn = gr.Button('\U0001f4dd New', variant='primary', size='sm')
+                        style_editor_close_btn = gr.Button('\u2716 Done', variant='secondary', size='sm')
                     
                     style_editor_name = gr.Textbox(
                         label='Style Name',
@@ -776,10 +778,12 @@ with shared.gradio_root:
                 
                 # Style Editor Event Handlers
                 def toggle_editor(is_visible):
-                    return gr.Group.update(visible=not is_visible), not is_visible
+                    # Toggle: show editor, hide selection panel (or vice versa)
+                    return gr.Group.update(visible=is_visible), gr.Group.update(visible=not is_visible), not is_visible
                 
                 def close_editor():
-                    return gr.Group.update(visible=False), False
+                    # Close editor, show selection panel
+                    return gr.Group.update(visible=False), gr.Group.update(visible=True), False
                 
                 def refresh_style_list():
                     style_manager.reload_styles()
@@ -861,12 +865,12 @@ with shared.gradio_root:
                 modify_styles_btn.click(
                     toggle_editor,
                     inputs=[editor_visible_state],
-                    outputs=[style_editor_panel, editor_visible_state]
+                    outputs=[style_selection_panel, style_editor_panel, editor_visible_state]
                 )
                 
                 style_editor_close_btn.click(
                     close_editor,
-                    outputs=[style_editor_panel, editor_visible_state]
+                    outputs=[style_editor_panel, style_selection_panel, editor_visible_state]
                 )
                 
                 style_editor_dropdown.change(
