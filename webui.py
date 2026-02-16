@@ -1747,6 +1747,12 @@ with shared.gradio_root:
                 else:
                     image_path = str(selected)
                 
+                # Handle nested dict in image_path
+                while isinstance(image_path, dict):
+                    image_path = image_path.get('path', image_path.get('name', image_path.get('image', '')))
+                if not isinstance(image_path, str):
+                    image_path = str(image_path) if image_path else ''
+                
                 from modules.image_library import ImageLibrary
                 lib = ImageLibrary()
                 info = lib.get_image_info(image_path)
