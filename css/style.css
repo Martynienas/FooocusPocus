@@ -733,8 +733,8 @@ body {
   margin-bottom: 10px;
 }
 
-/* Library Modal Overlay */
-.library-modal {
+/* Library Modal Overlay - Gradio handles display via visible prop */
+#image_library_modal {
   position: fixed !important;
   top: 0 !important;
   left: 0 !important;
@@ -742,11 +742,17 @@ body {
   height: 100vh !important;
   background: rgba(0, 0, 0, 0.85) !important;
   z-index: 9999 !important;
+  padding: 20px !important;
+  box-sizing: border-box !important;
+}
+
+/* Flex centering when visible */
+#image_library_modal .gradio-group {
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
-  padding: 20px !important;
-  box-sizing: border-box !important;
+  width: 100% !important;
+  height: 100% !important;
 }
 
 /* Library Modal Content */
