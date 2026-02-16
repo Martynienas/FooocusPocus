@@ -727,6 +727,75 @@ body {
    Image Library Styles
    ============================================================================= */
 
+/* Open Library Button */
+.open-library-btn {
+  margin-top: 10px;
+  margin-bottom: 10px;
+}
+
+/* Library Modal Overlay */
+.library-modal {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  background: rgba(0, 0, 0, 0.85) !important;
+  z-index: 9999 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  padding: 20px !important;
+  box-sizing: border-box !important;
+}
+
+/* Library Modal Content */
+.library-modal-content {
+  background: var(--background-fill-primary) !important;
+  border-radius: 12px !important;
+  width: 95vw !important;
+  max-width: 1400px !important;
+  max-height: 90vh !important;
+  overflow-y: auto !important;
+  padding: 20px !important;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5) !important;
+  border: 1px solid var(--border-color-primary) !important;
+}
+
+/* Library Modal Header */
+.library-modal-header {
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  margin-bottom: 15px !important;
+  padding-bottom: 10px !important;
+  border-bottom: 1px solid var(--border-color-primary) !important;
+}
+
+.library-modal-header h2 {
+  margin: 0 !important;
+  color: var(--body-text-color) !important;
+}
+
+/* Close Button */
+.library-close-btn {
+  width: 40px !important;
+  height: 40px !important;
+  min-width: 40px !important;
+  border-radius: 50% !important;
+  font-size: 24px !important;
+  line-height: 1 !important;
+  padding: 0 !important;
+  background: var(--background-fill-secondary) !important;
+  border: 1px solid var(--border-color-primary) !important;
+  cursor: pointer !important;
+}
+
+.library-close-btn:hover {
+  background: var(--color-accent) !important;
+  color: white !important;
+}
+
 /* Image Library Tab */
 #library_gallery {
   min-height: 400px;

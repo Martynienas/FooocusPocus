@@ -1419,11 +1419,21 @@ with shared.gradio_root:
                             interactive=True
                         )
                         blackout_nsfw_reset = gr.Button('↺ Reset', variant='secondary', elem_classes=['reset-btn'])
-            
-            # =========================================================================
-            # Image Library Tab - Browse, filter, and manage generated images
-            # =========================================================================
-            with gr.Tab(label='Image Library'):
+        
+        # =========================================================================
+        # Image Library Button (near gallery)
+        # =========================================================================
+        open_library_btn = gr.Button('📚 Open Image Library', variant='secondary', elem_id='open_library_btn', elem_classes=['open-library-btn'])
+        
+        # =========================================================================
+        # Image Library Modal - Full screen overlay
+        # =========================================================================
+        with gr.Group(elem_id='image_library_modal', elem_classes=['library-modal'], visible=False) as library_modal:
+            with gr.Column(elem_classes=['library-modal-content']):
+                with gr.Row(elem_classes=['library-modal-header']):
+                    gr.HTML('<h2>Image Library</h2>')
+                    close_library_btn = gr.Button('×', variant='secondary', elem_classes=['library-close-btn'], scale=0, min_width=40)
+                
                 gr.HTML('<p style="color: var(--body-text-color-subdued); font-size: 0.9em; margin-bottom: 10px;">Browse, filter, and manage your generated images. Click on an image to view details and load settings.</p>')
                 
                 with gr.Row():
@@ -1431,8 +1441,9 @@ with shared.gradio_root:
                     with gr.Column(scale=1):
                         library_search = gr.Textbox(label='Search', placeholder='Search by prompt or tags...', elem_id='library_search')
                         library_tags_filter = gr.Dropdown(label='Filter by Tags', multiselect=True, choices=[], value=[], elem_id='library_tags_filter')
-                        library_refresh_btn = gr.Button('🔄 Refresh Library', variant='secondary')
-                        library_scan_btn = gr.Button('📂 Scan All Images', variant='secondary')
+                        with gr.Row():
+                            library_refresh_btn = gr.Button('🔄 Refresh', variant='secondary')
+                            library_scan_btn = gr.Button('📂 Scan', variant='secondary')
                 
                 # Image gallery and details
                 with gr.Row():
@@ -1446,319 +1457,319 @@ with shared.gradio_root:
                         
                         with gr.Row():
                             library_load_settings_btn = gr.Button('📋 Load Settings', variant='primary', visible=False)
-                            library_delete_btn = gr.Button('🗑️ Delete Image', variant='stop', visible=False)
+                            library_delete_btn = gr.Button('🗑️ Delete', variant='stop', visible=False)
                         
                         # Tag editing
                         library_edit_tags = gr.Textbox(label='Edit Tags', placeholder='Enter tags separated by comma', visible=False)
                         library_save_tags_btn = gr.Button('💾 Save Tags', variant='secondary', visible=False)
-                
-                # Hidden state for selected image path
-                library_selected_path = gr.State(value=None)
-                
-                # =========================================================================
-                # Configuration Tab Event Handlers
-                # =========================================================================
-                
-                def update_folder_display(folder_type):
-                    """Get updated folder list for display."""
-                    folders = modules.config.get_model_folders(folder_type)
-                    return gr.update(value=[[p] for p in folders])
-                
-                def add_checkpoint_folder(folder_path):
-                    """Add a checkpoint folder and return updated display and model dropdowns."""
-                    if not folder_path or folder_path.strip() == '':
-                        return gr.update(), gr.update(), gr.update()
-                    
-                    success, message, new_folders = modules.config.add_model_folder('path_checkpoints', folder_path.strip())
-                    if success:
-                        reload_result = modules.config.reload_model_files()
-                        new_count = reload_result.get('model_count', 0)
-                        print(f"✓ {message}. Found {new_count} new models.")
-                        print(f"  Total models now: {len(modules.config.model_filenames)}")
-                        print(f"  First few: {modules.config.model_filenames[:3]}")
-                        return (
-                            gr.update(value=[[p] for p in new_folders]),
-                            gr.update(choices=modules.config.model_filenames),
-                            gr.update(choices=['None'] + modules.config.model_filenames)
-                        )
-                    else:
-                        print(f"✗ {message}")
-                        return gr.update(), gr.update(), gr.update()
-                
-                def add_lora_folder(folder_path):
-                    """Add a LoRA folder and return updated display."""
-                    if not folder_path or folder_path.strip() == '':
-                        # Return updates for folder display and all LoRA dropdowns (no change)
-                        lora_updates = [gr.update() for _ in range(len(lora_ctrls))]
-                        return (gr.update(), *lora_updates)
-                    
-                    success, message, new_folders = modules.config.add_model_folder('path_loras', folder_path.strip())
-                    if success:
-                        reload_result = modules.config.reload_model_files()
-                        new_count = reload_result.get('lora_count', 0)
-                        print(f"✓ {message}. Found {new_count} new LoRAs.")
-                        # Return updates for folder display and all LoRA dropdowns
-                        lora_updates = []
-                        for i in range(modules.config.default_max_lora_number):
-                            lora_updates.append(gr.update())  # enabled checkbox - no change
-                            lora_updates.append(gr.update(choices=['None', modules.config.random_lora_name] + modules.config.lora_filenames))  # model dropdown
-                            lora_updates.append(gr.update())  # weight slider - no change
-                        return (
-                            gr.update(value=[[p] for p in new_folders]),
-                            *lora_updates
-                        )
-                    else:
-                        print(f"✗ {message}")
-                        lora_updates = [gr.update() for _ in range(len(lora_ctrls))]
-                        return (gr.update(), *lora_updates)
-                
-                def reset_checkpoint_folders():
-                    """Reset checkpoint folders to default."""
-                    default = modules.config.get_default_config_value('path_checkpoints')
-                    modules.config.config_dict['path_checkpoints'] = default
-                    modules.config.reload_model_files()
-                    return gr.update(value=[[p] for p in default])
-                
-                def reset_lora_folders():
-                    """Reset LoRA folders to default."""
-                    default = modules.config.get_default_config_value('path_loras')
-                    modules.config.config_dict['path_loras'] = default
-                    modules.config.reload_model_files()
-                    return gr.update(value=[[p] for p in default])
-                
-                def reset_single_path(key, current_value):
-                    """Reset a single path config to default."""
-                    default = modules.config.get_default_config_value(key)
-                    if default:
-                        modules.config.config_dict[key] = default
-                        return gr.update(value=default)
-                    return gr.update()
-                
-                def reset_slider_value(key):
-                    """Reset a slider value to default."""
-                    default = modules.config.get_default_config_value(key)
-                    if default is not None:
-                        modules.config.config_dict[key] = default
-                        return gr.update(value=default)
-                    return gr.update()
-                
-                def reset_dropdown_value(key, choices=None):
-                    """Reset a dropdown value to default."""
-                    default = modules.config.get_default_config_value(key)
-                    if default is not None:
-                        modules.config.config_dict[key] = default
-                        return gr.update(value=default)
-                    return gr.update()
-                
-                def reset_checkbox_value(key):
-                    """Reset a checkbox value to default."""
-                    default = modules.config.get_default_config_value(key)
-                    if default is not None:
-                        modules.config.config_dict[key] = default
-                        return gr.update(value=default)
-                    return gr.update()
-                
-                def save_all_config():
-                    """Save all configuration to file."""
-                    if modules.config.save_config():
-                        return '<p style="color: green; padding: 10px;">✓ Configuration saved successfully!</p>'
-                    else:
-                        return '<p style="color: red; padding: 10px;">✗ Failed to save configuration</p>'
-                
-                def restore_all_defaults():
-                    """Restore all configuration to defaults."""
-                    modules.config.restore_all_to_defaults()
-                    modules.config.reload_model_files()
-                    return '<p style="color: green; padding: 10px;">✓ All settings restored to defaults!</p>'
-                
-                # Wire up folder management events
-                checkpoint_add_btn.click(
-                    add_checkpoint_folder,
-                    inputs=[checkpoint_folder_input],
-                    outputs=[checkpoint_folders_display, base_model, refiner_model]
+        
+        # Hidden state for selected image path
+        library_selected_path = gr.State(value=None)
+        
+        # =========================================================================
+        # Configuration Tab Event Handlers
+        # =========================================================================
+        
+        def update_folder_display(folder_type):
+            """Get updated folder list for display."""
+            folders = modules.config.get_model_folders(folder_type)
+            return gr.update(value=[[p] for p in folders])
+        
+        def add_checkpoint_folder(folder_path):
+            """Add a checkpoint folder and return updated display and model dropdowns."""
+            if not folder_path or folder_path.strip() == '':
+                return gr.update(), gr.update(), gr.update()
+            
+            success, message, new_folders = modules.config.add_model_folder('path_checkpoints', folder_path.strip())
+            if success:
+                reload_result = modules.config.reload_model_files()
+                new_count = reload_result.get('model_count', 0)
+                print(f"✓ {message}. Found {new_count} new models.")
+                print(f"  Total models now: {len(modules.config.model_filenames)}")
+                print(f"  First few: {modules.config.model_filenames[:3]}")
+                return (
+                    gr.update(value=[[p] for p in new_folders]),
+                    gr.update(choices=modules.config.model_filenames),
+                    gr.update(choices=['None'] + modules.config.model_filenames)
                 )
-                checkpoint_reset_btn.click(
-                    reset_checkpoint_folders,
-                    outputs=[checkpoint_folders_display]
+            else:
+                print(f"✗ {message}")
+                return gr.update(), gr.update(), gr.update()
+        
+        def add_lora_folder(folder_path):
+            """Add a LoRA folder and return updated display."""
+            if not folder_path or folder_path.strip() == '':
+                # Return updates for folder display and all LoRA dropdowns (no change)
+                lora_updates = [gr.update() for _ in range(len(lora_ctrls))]
+                return (gr.update(), *lora_updates)
+            
+            success, message, new_folders = modules.config.add_model_folder('path_loras', folder_path.strip())
+            if success:
+                reload_result = modules.config.reload_model_files()
+                new_count = reload_result.get('lora_count', 0)
+                print(f"✓ {message}. Found {new_count} new LoRAs.")
+                # Return updates for folder display and all LoRA dropdowns
+                lora_updates = []
+                for i in range(modules.config.default_max_lora_number):
+                    lora_updates.append(gr.update())  # enabled checkbox - no change
+                    lora_updates.append(gr.update(choices=['None', modules.config.random_lora_name] + modules.config.lora_filenames))  # model dropdown
+                    lora_updates.append(gr.update())  # weight slider - no change
+                return (
+                    gr.update(value=[[p] for p in new_folders]),
+                    *lora_updates
                 )
-                
-                lora_add_btn.click(
-                    add_lora_folder,
-                    inputs=[lora_folder_input],
-                    outputs=[lora_folders_display] + lora_ctrls
-                )
-                lora_reset_btn.click(
-                    reset_lora_folders,
-                    outputs=[lora_folders_display]
-                )
-                
-                # Wire up single path resets
-                embeddings_reset.click(
-                    lambda: reset_single_path('path_embeddings', modules.config.path_embeddings),
-                    outputs=[embeddings_path]
-                )
-                vae_path_reset.click(
-                    lambda: reset_single_path('path_vae', modules.config.path_vae),
-                    outputs=[vae_path]
-                )
-                controlnet_reset.click(
-                    lambda: reset_single_path('path_controlnet', modules.config.path_controlnet),
-                    outputs=[controlnet_path]
-                )
-                upscale_reset.click(
-                    lambda: reset_single_path('path_upscale_models', modules.config.path_upscale_models),
-                    outputs=[upscale_path]
-                )
-                output_path_reset.click(
-                    lambda: reset_single_path('path_outputs', modules.config.path_outputs),
-                    outputs=[output_path]
-                )
-                temp_path_reset.click(
-                    lambda: reset_single_path('temp_path', modules.config.temp_path),
-                    outputs=[temp_path_config]
-                )
-                temp_cleanup_reset.click(
-                    lambda: reset_checkbox_value('temp_path_cleanup_on_launch'),
-                    outputs=[temp_cleanup]
-                )
-                
-                # Wire up default model resets
-                default_model_reset.click(
-                    lambda: reset_dropdown_value('default_model'),
-                    outputs=[config_default_model]
-                )
-                default_refiner_reset.click(
-                    lambda: reset_dropdown_value('default_refiner'),
-                    outputs=[config_default_refiner]
-                )
-                refiner_switch_reset.click(
-                    lambda: reset_slider_value('default_refiner_switch'),
-                    outputs=[config_refiner_switch]
-                )
-                default_vae_reset.click(
-                    lambda: reset_dropdown_value('default_vae'),
-                    outputs=[config_default_vae]
-                )
-                
-                # Wire up generation settings resets
-                default_steps_reset.click(
-                    lambda: reset_slider_value('default_steps'),
-                    outputs=[config_default_steps]
-                )
-                upscale_steps_reset.click(
-                    lambda: reset_slider_value('default_upscale_steps'),
-                    outputs=[config_upscale_steps]
-                )
-                cfg_scale_reset.click(
-                    lambda: reset_slider_value('default_cfg_scale'),
-                    outputs=[config_cfg_scale]
-                )
-                sharpness_reset.click(
-                    lambda: reset_slider_value('default_sample_sharpness'),
-                    outputs=[config_sharpness]
-                )
-                sampler_reset.click(
-                    lambda: reset_dropdown_value('default_sampler'),
-                    outputs=[config_sampler]
-                )
-                scheduler_reset.click(
-                    lambda: reset_dropdown_value('default_scheduler'),
-                    outputs=[config_scheduler]
-                )
-                clip_skip_reset.click(
-                    lambda: reset_slider_value('default_clip_skip'),
-                    outputs=[config_clip_skip]
-                )
-                adaptive_cfg_reset.click(
-                    lambda: reset_slider_value('default_cfg_tsnr'),
-                    outputs=[config_adaptive_cfg]
-                )
-                
-                # Wire up styles reset
-                default_styles_reset.click(
-                    lambda: reset_dropdown_value('default_styles'),
-                    outputs=[config_default_styles]
-                )
-                
-                # Wire up image settings resets
-                image_number_reset.click(
-                    lambda: reset_slider_value('default_image_number'),
-                    outputs=[config_image_number]
-                )
-                max_images_reset.click(
-                    lambda: reset_slider_value('default_max_image_number'),
-                    outputs=[config_max_images]
-                )
-                output_format_reset.click(
-                    lambda: reset_dropdown_value('default_output_format'),
-                    outputs=[config_output_format]
-                )
-                aspect_ratio_reset.click(
-                    lambda: reset_dropdown_value('default_aspect_ratio'),
-                    outputs=[config_aspect_ratio]
-                )
-                
-                # Wire up UI defaults resets
-                advanced_cb_reset.click(
-                    lambda: reset_checkbox_value('default_advanced_checkbox'),
-                    outputs=[config_advanced_cb]
-                )
-                debug_mode_reset.click(
-                    lambda: reset_checkbox_value('default_developer_debug_mode_checkbox'),
-                    outputs=[config_debug_mode]
-                )
-                save_metadata_reset.click(
-                    lambda: reset_checkbox_value('default_save_metadata_to_images'),
-                    outputs=[config_save_metadata]
-                )
-                blackout_nsfw_reset.click(
-                    lambda: reset_checkbox_value('default_black_out_nsfw'),
-                    outputs=[config_blackout_nsfw]
-                )
-                
-                # Wire up save/restore all
-                save_config_btn.click(save_all_config, outputs=[config_status])
-                restore_all_btn.click(restore_all_defaults, outputs=[config_status])
-                
-                # Auto-save on config changes
-                def auto_save_config(key, value):
-                    """Update config value and auto-save."""
-                    modules.config.update_config_value(key, value)
-                    modules.config.save_config()
-                    return ''
-                
-                # Wire auto-save for key settings
-                config_default_model.change(lambda v: auto_save_config('default_model', v), inputs=[config_default_model])
-                config_default_refiner.change(lambda v: auto_save_config('default_refiner', v), inputs=[config_default_refiner])
-                config_refiner_switch.change(lambda v: auto_save_config('default_refiner_switch', v), inputs=[config_refiner_switch])
-                config_default_vae.change(lambda v: auto_save_config('default_vae', v), inputs=[config_default_vae])
-                config_default_steps.change(lambda v: auto_save_config('default_steps', v), inputs=[config_default_steps])
-                config_upscale_steps.change(lambda v: auto_save_config('default_upscale_steps', v), inputs=[config_upscale_steps])
-                config_cfg_scale.change(lambda v: auto_save_config('default_cfg_scale', v), inputs=[config_cfg_scale])
-                config_sharpness.change(lambda v: auto_save_config('default_sample_sharpness', v), inputs=[config_sharpness])
-                config_sampler.change(lambda v: auto_save_config('default_sampler', v), inputs=[config_sampler])
-                config_scheduler.change(lambda v: auto_save_config('default_scheduler', v), inputs=[config_scheduler])
-                config_clip_skip.change(lambda v: auto_save_config('default_clip_skip', v), inputs=[config_clip_skip])
-                config_adaptive_cfg.change(lambda v: auto_save_config('default_cfg_tsnr', v), inputs=[config_adaptive_cfg])
-                config_default_styles.change(lambda v: auto_save_config('default_styles', v), inputs=[config_default_styles])
-                config_image_number.change(lambda v: auto_save_config('default_image_number', v), inputs=[config_image_number])
-                config_max_images.change(lambda v: auto_save_config('default_max_image_number', v), inputs=[config_max_images])
-                config_output_format.change(lambda v: auto_save_config('default_output_format', v), inputs=[config_output_format])
-                config_aspect_ratio.change(lambda v: auto_save_config('default_aspect_ratio', v), inputs=[config_aspect_ratio])
-                config_advanced_cb.change(lambda v: auto_save_config('default_advanced_checkbox', v), inputs=[config_advanced_cb])
-                config_debug_mode.change(lambda v: auto_save_config('default_developer_debug_mode_checkbox', v), inputs=[config_debug_mode])
-                config_save_metadata.change(lambda v: auto_save_config('default_save_metadata_to_images', v), inputs=[config_save_metadata])
-                config_metadata_scheme.change(lambda v: auto_save_config('default_metadata_scheme', v), inputs=[config_metadata_scheme])
-                config_blackout_nsfw.change(lambda v: auto_save_config('default_black_out_nsfw', v), inputs=[config_blackout_nsfw])
-                
-                # Wire auto-save for path settings
-                embeddings_path.change(lambda v: auto_save_config('path_embeddings', v), inputs=[embeddings_path])
-                vae_path.change(lambda v: auto_save_config('path_vae', v), inputs=[vae_path])
-                controlnet_path.change(lambda v: auto_save_config('path_controlnet', v), inputs=[controlnet_path])
-                upscale_path.change(lambda v: auto_save_config('path_upscale_models', v), inputs=[upscale_path])
-                output_path.change(lambda v: auto_save_config('path_outputs', v), inputs=[output_path])
-                temp_path_config.change(lambda v: auto_save_config('temp_path', v), inputs=[temp_path_config])
-                temp_cleanup.change(lambda v: auto_save_config('temp_path_cleanup_on_launch', v), inputs=[temp_cleanup])
+            else:
+                print(f"✗ {message}")
+                lora_updates = [gr.update() for _ in range(len(lora_ctrls))]
+                return (gr.update(), *lora_updates)
+        
+        def reset_checkpoint_folders():
+            """Reset checkpoint folders to default."""
+            default = modules.config.get_default_config_value('path_checkpoints')
+            modules.config.config_dict['path_checkpoints'] = default
+            modules.config.reload_model_files()
+            return gr.update(value=[[p] for p in default])
+        
+        def reset_lora_folders():
+            """Reset LoRA folders to default."""
+            default = modules.config.get_default_config_value('path_loras')
+            modules.config.config_dict['path_loras'] = default
+            modules.config.reload_model_files()
+            return gr.update(value=[[p] for p in default])
+        
+        def reset_single_path(key, current_value):
+            """Reset a single path config to default."""
+            default = modules.config.get_default_config_value(key)
+            if default:
+                modules.config.config_dict[key] = default
+                return gr.update(value=default)
+            return gr.update()
+        
+        def reset_slider_value(key):
+            """Reset a slider value to default."""
+            default = modules.config.get_default_config_value(key)
+            if default is not None:
+                modules.config.config_dict[key] = default
+                return gr.update(value=default)
+            return gr.update()
+        
+        def reset_dropdown_value(key, choices=None):
+            """Reset a dropdown value to default."""
+            default = modules.config.get_default_config_value(key)
+            if default is not None:
+                modules.config.config_dict[key] = default
+                return gr.update(value=default)
+            return gr.update()
+        
+        def reset_checkbox_value(key):
+            """Reset a checkbox value to default."""
+            default = modules.config.get_default_config_value(key)
+            if default is not None:
+                modules.config.config_dict[key] = default
+                return gr.update(value=default)
+            return gr.update()
+        
+        def save_all_config():
+            """Save all configuration to file."""
+            if modules.config.save_config():
+                return '<p style="color: green; padding: 10px;">✓ Configuration saved successfully!</p>'
+            else:
+                return '<p style="color: red; padding: 10px;">✗ Failed to save configuration</p>'
+        
+        def restore_all_defaults():
+            """Restore all configuration to defaults."""
+            modules.config.restore_all_to_defaults()
+            modules.config.reload_model_files()
+            return '<p style="color: green; padding: 10px;">✓ All settings restored to defaults!</p>'
+        
+        # Wire up folder management events
+        checkpoint_add_btn.click(
+            add_checkpoint_folder,
+            inputs=[checkpoint_folder_input],
+            outputs=[checkpoint_folders_display, base_model, refiner_model]
+        )
+        checkpoint_reset_btn.click(
+            reset_checkpoint_folders,
+            outputs=[checkpoint_folders_display]
+        )
+        
+        lora_add_btn.click(
+            add_lora_folder,
+            inputs=[lora_folder_input],
+            outputs=[lora_folders_display] + lora_ctrls
+        )
+        lora_reset_btn.click(
+            reset_lora_folders,
+            outputs=[lora_folders_display]
+        )
+        
+        # Wire up single path resets
+        embeddings_reset.click(
+            lambda: reset_single_path('path_embeddings', modules.config.path_embeddings),
+            outputs=[embeddings_path]
+        )
+        vae_path_reset.click(
+            lambda: reset_single_path('path_vae', modules.config.path_vae),
+            outputs=[vae_path]
+        )
+        controlnet_reset.click(
+            lambda: reset_single_path('path_controlnet', modules.config.path_controlnet),
+            outputs=[controlnet_path]
+        )
+        upscale_reset.click(
+            lambda: reset_single_path('path_upscale_models', modules.config.path_upscale_models),
+            outputs=[upscale_path]
+        )
+        output_path_reset.click(
+            lambda: reset_single_path('path_outputs', modules.config.path_outputs),
+            outputs=[output_path]
+        )
+        temp_path_reset.click(
+            lambda: reset_single_path('temp_path', modules.config.temp_path),
+            outputs=[temp_path_config]
+        )
+        temp_cleanup_reset.click(
+            lambda: reset_checkbox_value('temp_path_cleanup_on_launch'),
+            outputs=[temp_cleanup]
+        )
+        
+        # Wire up default model resets
+        default_model_reset.click(
+            lambda: reset_dropdown_value('default_model'),
+            outputs=[config_default_model]
+        )
+        default_refiner_reset.click(
+            lambda: reset_dropdown_value('default_refiner'),
+            outputs=[config_default_refiner]
+        )
+        refiner_switch_reset.click(
+            lambda: reset_slider_value('default_refiner_switch'),
+            outputs=[config_refiner_switch]
+        )
+        default_vae_reset.click(
+            lambda: reset_dropdown_value('default_vae'),
+            outputs=[config_default_vae]
+        )
+        
+        # Wire up generation settings resets
+        default_steps_reset.click(
+            lambda: reset_slider_value('default_steps'),
+            outputs=[config_default_steps]
+        )
+        upscale_steps_reset.click(
+            lambda: reset_slider_value('default_upscale_steps'),
+            outputs=[config_upscale_steps]
+        )
+        cfg_scale_reset.click(
+            lambda: reset_slider_value('default_cfg_scale'),
+            outputs=[config_cfg_scale]
+        )
+        sharpness_reset.click(
+            lambda: reset_slider_value('default_sample_sharpness'),
+            outputs=[config_sharpness]
+        )
+        sampler_reset.click(
+            lambda: reset_dropdown_value('default_sampler'),
+            outputs=[config_sampler]
+        )
+        scheduler_reset.click(
+            lambda: reset_dropdown_value('default_scheduler'),
+            outputs=[config_scheduler]
+        )
+        clip_skip_reset.click(
+            lambda: reset_slider_value('default_clip_skip'),
+            outputs=[config_clip_skip]
+        )
+        adaptive_cfg_reset.click(
+            lambda: reset_slider_value('default_cfg_tsnr'),
+            outputs=[config_adaptive_cfg]
+        )
+        
+        # Wire up styles reset
+        default_styles_reset.click(
+            lambda: reset_dropdown_value('default_styles'),
+            outputs=[config_default_styles]
+        )
+        
+        # Wire up image settings resets
+        image_number_reset.click(
+            lambda: reset_slider_value('default_image_number'),
+            outputs=[config_image_number]
+        )
+        max_images_reset.click(
+            lambda: reset_slider_value('default_max_image_number'),
+            outputs=[config_max_images]
+        )
+        output_format_reset.click(
+            lambda: reset_dropdown_value('default_output_format'),
+            outputs=[config_output_format]
+        )
+        aspect_ratio_reset.click(
+            lambda: reset_dropdown_value('default_aspect_ratio'),
+            outputs=[config_aspect_ratio]
+        )
+        
+        # Wire up UI defaults resets
+        advanced_cb_reset.click(
+            lambda: reset_checkbox_value('default_advanced_checkbox'),
+            outputs=[config_advanced_cb]
+        )
+        debug_mode_reset.click(
+            lambda: reset_checkbox_value('default_developer_debug_mode_checkbox'),
+            outputs=[config_debug_mode]
+        )
+        save_metadata_reset.click(
+            lambda: reset_checkbox_value('default_save_metadata_to_images'),
+            outputs=[config_save_metadata]
+        )
+        blackout_nsfw_reset.click(
+            lambda: reset_checkbox_value('default_black_out_nsfw'),
+            outputs=[config_blackout_nsfw]
+        )
+        
+        # Wire up save/restore all
+        save_config_btn.click(save_all_config, outputs=[config_status])
+        restore_all_btn.click(restore_all_defaults, outputs=[config_status])
+        
+        # Auto-save on config changes
+        def auto_save_config(key, value):
+            """Update config value and auto-save."""
+            modules.config.update_config_value(key, value)
+            modules.config.save_config()
+            return ''
+        
+        # Wire auto-save for key settings
+        config_default_model.change(lambda v: auto_save_config('default_model', v), inputs=[config_default_model])
+        config_default_refiner.change(lambda v: auto_save_config('default_refiner', v), inputs=[config_default_refiner])
+        config_refiner_switch.change(lambda v: auto_save_config('default_refiner_switch', v), inputs=[config_refiner_switch])
+        config_default_vae.change(lambda v: auto_save_config('default_vae', v), inputs=[config_default_vae])
+        config_default_steps.change(lambda v: auto_save_config('default_steps', v), inputs=[config_default_steps])
+        config_upscale_steps.change(lambda v: auto_save_config('default_upscale_steps', v), inputs=[config_upscale_steps])
+        config_cfg_scale.change(lambda v: auto_save_config('default_cfg_scale', v), inputs=[config_cfg_scale])
+        config_sharpness.change(lambda v: auto_save_config('default_sample_sharpness', v), inputs=[config_sharpness])
+        config_sampler.change(lambda v: auto_save_config('default_sampler', v), inputs=[config_sampler])
+        config_scheduler.change(lambda v: auto_save_config('default_scheduler', v), inputs=[config_scheduler])
+        config_clip_skip.change(lambda v: auto_save_config('default_clip_skip', v), inputs=[config_clip_skip])
+        config_adaptive_cfg.change(lambda v: auto_save_config('default_cfg_tsnr', v), inputs=[config_adaptive_cfg])
+        config_default_styles.change(lambda v: auto_save_config('default_styles', v), inputs=[config_default_styles])
+        config_image_number.change(lambda v: auto_save_config('default_image_number', v), inputs=[config_image_number])
+        config_max_images.change(lambda v: auto_save_config('default_max_image_number', v), inputs=[config_max_images])
+        config_output_format.change(lambda v: auto_save_config('default_output_format', v), inputs=[config_output_format])
+        config_aspect_ratio.change(lambda v: auto_save_config('default_aspect_ratio', v), inputs=[config_aspect_ratio])
+        config_advanced_cb.change(lambda v: auto_save_config('default_advanced_checkbox', v), inputs=[config_advanced_cb])
+        config_debug_mode.change(lambda v: auto_save_config('default_developer_debug_mode_checkbox', v), inputs=[config_debug_mode])
+        config_save_metadata.change(lambda v: auto_save_config('default_save_metadata_to_images', v), inputs=[config_save_metadata])
+        config_metadata_scheme.change(lambda v: auto_save_config('default_metadata_scheme', v), inputs=[config_metadata_scheme])
+        config_blackout_nsfw.change(lambda v: auto_save_config('default_black_out_nsfw', v), inputs=[config_blackout_nsfw])
+        
+        # Wire auto-save for path settings
+        embeddings_path.change(lambda v: auto_save_config('path_embeddings', v), inputs=[embeddings_path])
+        vae_path.change(lambda v: auto_save_config('path_vae', v), inputs=[vae_path])
+        controlnet_path.change(lambda v: auto_save_config('path_controlnet', v), inputs=[controlnet_path])
+        upscale_path.change(lambda v: auto_save_config('path_upscale_models', v), inputs=[upscale_path])
+        output_path.change(lambda v: auto_save_config('path_outputs', v), inputs=[output_path])
+        temp_path_config.change(lambda v: auto_save_config('temp_path', v), inputs=[temp_path_config])
+        temp_cleanup.change(lambda v: auto_save_config('temp_path_cleanup_on_launch', v), inputs=[temp_cleanup])
         
         state_is_generating = gr.State(False)
 
@@ -1790,10 +1801,11 @@ with shared.gradio_root:
                 images = lib.filter_images(images, tags=filter_tags)
             
             # Get all available tags for dropdown
-            all_tags = lib.get_all_tags()
+            all_tags = list(lib.get_all_tags().keys())
             
             # Return gallery images and tag choices
-            gallery_images = [[img['path'], img.get('name', '')] for img in images]
+            # Gallery format: list of [path, label] where label is shown on hover
+            gallery_images = [[img['path'], img.get('filename', '')] for img in images]
             return gr.update(value=gallery_images), gr.update(choices=all_tags)
         
         def library_on_image_select(evt: gr.SelectData, gallery_value):
@@ -1806,12 +1818,22 @@ with shared.gradio_root:
                 lib = ImageLibrary()
                 info = lib.get_image_info(image_path)
                 
-                # Get current tags
-                current_tags = info.get('tags', '') if info else ''
+                if info is None:
+                    return gr.update(), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), None
+                
+                # Get current tags - handle both list and string formats
+                tags = info.get('tags', [])
+                if isinstance(tags, list):
+                    current_tags = ', '.join(tags)
+                else:
+                    current_tags = str(tags) if tags else ''
+                
+                # Return metadata for JSON display
+                metadata = info.get('metadata', {})
                 
                 return (
                     gr.update(value=image_path),
-                    info,
+                    metadata,
                     gr.update(visible=True),
                     gr.update(visible=True),
                     gr.update(visible=True, value=current_tags),
@@ -1825,11 +1847,16 @@ with shared.gradio_root:
             if not image_info:
                 return [gr.update()] * len(load_data_outputs)
             
-            # Convert image info to parameters format
+            # The image_info is already the metadata dict from library_on_image_select
+            # We need to convert it to the format expected by load_parameter_button_click
             import json
-            params = json.dumps(image_info) if isinstance(image_info, dict) else image_info
+            params = json.dumps(image_info) if isinstance(image_info, dict) else str(image_info)
             
-            return modules.meta_parser.load_parameter_button_click(params, False, inpaint_mode_state=None)
+            try:
+                return modules.meta_parser.load_parameter_button_click(params, False, inpaint_mode_state=None)
+            except Exception as e:
+                print(f"Error loading settings: {e}")
+                return [gr.update()] * len(load_data_outputs)
         
         def library_save_tags(image_path, new_tags):
             """Save tags to the selected image."""
@@ -1838,18 +1865,25 @@ with shared.gradio_root:
             
             from modules.image_library import ImageLibrary
             lib = ImageLibrary()
-            success = lib.update_image_tags(image_path, new_tags)
+            
+            # Convert comma-separated tags to list
+            if isinstance(new_tags, str):
+                tags_list = [t.strip() for t in new_tags.split(',') if t.strip()]
+            else:
+                tags_list = new_tags
+            
+            success = lib.update_image_tags(image_path, tags_list)
             
             if success:
                 # Refresh tags dropdown
-                all_tags = lib.get_all_tags()
+                all_tags = list(lib.get_all_tags().keys())
                 return gr.update(choices=all_tags)
             return gr.update()
         
         def library_delete_image(image_path):
             """Delete the selected image."""
             if not image_path:
-                return gr.update(), gr.update()
+                return gr.update(), gr.update(), None
             
             from modules.image_library import ImageLibrary
             lib = ImageLibrary()
@@ -1857,14 +1891,25 @@ with shared.gradio_root:
             
             if success:
                 # Refresh gallery
+                lib.clear_cache()
                 images = lib.scan_images()
-                gallery_images = [[img['path'], img.get('name', '')] for img in images]
+                gallery_images = [[img['path'], img.get('filename', '')] for img in images]
                 return (
                     gr.update(value=gallery_images),
                     gr.update(value=None),
                     None
                 )
             return gr.update(), gr.update(), image_path
+        
+        # Modal open/close handlers
+        def open_library_modal():
+            return gr.update(visible=True)
+        
+        def close_library_modal():
+            return gr.update(visible=False)
+        
+        open_library_btn.click(open_library_modal, outputs=[library_modal])
+        close_library_btn.click(close_library_modal, outputs=[library_modal])
         
         # Wire up Image Library events
         library_refresh_btn.click(
