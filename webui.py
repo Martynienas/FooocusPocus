@@ -1794,7 +1794,7 @@ with shared.gradio_root:
             params = json.dumps(image_info) if isinstance(image_info, dict) else str(image_info)
             
             try:
-                return modules.meta_parser.load_parameter_button_click(params, False, inpaint_mode_state=None)
+                return modules.meta_parser.load_parameter_button_click(params, False, inpaint_mode=None)
             except Exception as e:
                 print(f"Error loading settings: {e}")
                 return [gr.update()] * len(load_data_outputs)
