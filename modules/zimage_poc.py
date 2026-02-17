@@ -397,9 +397,83 @@ def _split_single_file_state_dict(single_file_path: str, include_aux_weights: bo
     }
 
 
+def _convert_z_image_transformer_checkpoint_to_diffusers(checkpoint: dict) -> dict:
+    # Ported from diffusers single-file converter for ZImageTransformer2DModel.
+    renamed = {}
+    for key, value in checkpoint.items():
+        new_key = key
+        new_key = new_key.replace("final_layer.", "all_final_layer.2-1.")
+        new_key = new_key.replace("x_embedder.", "all_x_embedder.2-1.")
+        new_key = new_key.replace(".attention.out.bias", ".attention.to_out.0.bias")
+        new_key = new_key.replace(".attention.k_norm.weight", ".attention.norm_k.weight")
+        new_key = new_key.replace(".attention.q_norm.weight", ".attention.norm_q.weight")
+        new_key = new_key.replace(".attention.out.weight", ".attention.to_out.0.weight")
+        renamed[new_key] = value
+
+    converted = {}
+    for key, value in renamed.items():
+        if ".attention.qkv.weight" in key:
+            to_q_weight, to_k_weight, to_v_weight = value.chunk(3, dim=0)
+            converted[key.replace(".attention.qkv.weight", ".attention.to_q.weight")] = to_q_weight
+            converted[key.replace(".attention.qkv.weight", ".attention.to_k.weight")] = to_k_weight
+            converted[key.replace(".attention.qkv.weight", ".attention.to_v.weight")] = to_v_weight
+            continue
+        if ".attention.qkv.bias" in key:
+            to_q_bias, to_k_bias, to_v_bias = value.chunk(3, dim=0)
+            converted[key.replace(".attention.qkv.bias", ".attention.to_q.bias")] = to_q_bias
+            converted[key.replace(".attention.qkv.bias", ".attention.to_k.bias")] = to_k_bias
+            converted[key.replace(".attention.qkv.bias", ".attention.to_v.bias")] = to_v_bias
+            continue
+        converted[key] = value
+
+    return converted
+
+
+def _transformer_match_score(state_dict: dict, model_keys: set[str]) -> int:
+    if not state_dict or not model_keys:
+        return 0
+
+    strip_prefixes = [
+        "model.diffusion_model.",
+        "diffusion_model.",
+        "transformer.",
+        "model.",
+    ]
+
+    matched = 0
+    for src_key in state_dict.keys():
+        if src_key in model_keys:
+            matched += 1
+            continue
+        for pref in strip_prefixes:
+            if src_key.startswith(pref) and src_key[len(pref) :] in model_keys:
+                matched += 1
+                break
+    return matched
+
+
 def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) -> None:
     parts = _split_single_file_state_dict(single_file_path, include_aux_weights=True)
     transformer_sd = parts["transformer"]
+    transformer_component = getattr(pipeline, "transformer", None)
+    transformer_model_keys = (
+        set(transformer_component.state_dict().keys()) if transformer_component is not None else set()
+    )
+
+    if transformer_sd and transformer_model_keys:
+        best_sd = transformer_sd
+        base_score = _transformer_match_score(best_sd, transformer_model_keys)
+        try:
+            converted_sd = _convert_z_image_transformer_checkpoint_to_diffusers(dict(transformer_sd))
+            converted_score = _transformer_match_score(converted_sd, transformer_model_keys)
+            if converted_score > base_score:
+                print(
+                    f"[Z-Image POC] Using Forge-style Z-Image transformer key mapping "
+                    f"(score {base_score}->{converted_score})."
+                )
+                transformer_sd = converted_sd
+        except Exception as e:
+            print(f"[Z-Image POC] Z-Image transformer conversion skipped: {e}")
 
     if not transformer_sd:
         raise RuntimeError(
@@ -458,7 +532,7 @@ def _apply_component_state_dict(
     print(f"[Z-Image POC] Loaded {label} from single-file ({len(state_dict)} tensors).")
 
 
-def _remap_state_dict_to_model_keys(state_dict: dict, model_keys: set[str], label: str) -> dict:
+def _remap_state_dict_to_model_keys(state_dict: dict, model_keys: set[str], label: str, verbose: bool = True) -> dict:
     if not state_dict:
         return state_dict
 
@@ -492,7 +566,7 @@ def _remap_state_dict_to_model_keys(state_dict: dict, model_keys: set[str], labe
 
     total = max(len(state_dict), 1)
     ratio = matched / float(total)
-    if matched != len(state_dict):
+    if verbose and matched != len(state_dict):
         print(f"[Z-Image POC] {label} remap coverage: matched={matched}/{len(state_dict)} ({ratio:.2%})")
     return remapped
 
@@ -593,7 +667,26 @@ def _build_pipeline_from_single_file_components(
 
     transformer_component = getattr(pipeline, "transformer", None)
     transformer_model_keys = set(transformer_component.state_dict().keys()) if transformer_component is not None else set()
-    remapped_transformer_sd = _remap_state_dict_to_model_keys(parts["transformer"], transformer_model_keys, "transformer")
+    raw_transformer_sd = parts["transformer"]
+
+    selected_transformer_sd = raw_transformer_sd
+    if raw_transformer_sd and transformer_model_keys:
+        base_score = _transformer_match_score(raw_transformer_sd, transformer_model_keys)
+        try:
+            converted_transformer_sd = _convert_z_image_transformer_checkpoint_to_diffusers(dict(raw_transformer_sd))
+            converted_score = _transformer_match_score(converted_transformer_sd, transformer_model_keys)
+            if converted_score > base_score:
+                print(
+                    f"[Z-Image POC] Using Forge-style Z-Image transformer key mapping "
+                    f"(score {base_score}->{converted_score})."
+                )
+                selected_transformer_sd = converted_transformer_sd
+        except Exception as e:
+            print(f"[Z-Image POC] Z-Image transformer conversion skipped: {e}")
+
+    remapped_transformer_sd = _remap_state_dict_to_model_keys(
+        selected_transformer_sd, transformer_model_keys, "transformer"
+    )
 
     _apply_component_state_dict(
         transformer_component,
@@ -640,6 +733,20 @@ def _pick_device_and_dtype():
             return "cuda", torch.bfloat16
         return "cuda", torch.float16
     return "cpu", torch.float32
+
+
+def _pipeline_has_meta_tensors(pipeline) -> bool:
+    for name in ("transformer", "text_encoder", "vae"):
+        module = getattr(pipeline, name, None)
+        if module is None:
+            continue
+        try:
+            for p in module.parameters():
+                if getattr(p, "is_meta", False):
+                    return True
+        except Exception:
+            continue
+    return False
 
 
 def _cuda_total_vram_gb() -> float:
@@ -789,6 +896,10 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
     cache_key = f"{source_kind}:{os.path.abspath(source_path)}"
     if cache_key in _PIPELINE_CACHE:
         pipeline, _, _ = _PIPELINE_CACHE[cache_key]
+        if _pipeline_has_meta_tensors(pipeline):
+            print("[Z-Image POC] Cached pipeline has meta tensors, rebuilding pipeline.")
+            _PIPELINE_CACHE.pop(cache_key, None)
+            return _load_pipeline(source_kind, source_path, flavor, checkpoint_folders)
         device, _ = _pick_device_and_dtype()
         generator_device, used_offload = _prepare_pipeline_memory_mode(pipeline, device)
         _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
@@ -840,6 +951,8 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
                 else:
                     print("[Z-Image POC] FP8 checkpoint detected, preferring native single-file loader.")
                     pipeline = DiffusionPipeline.from_single_file(source_path, **native_kwargs)
+                if pipeline is not None and _pipeline_has_meta_tensors(pipeline):
+                    raise RuntimeError("native single-file produced meta tensors")
         except Exception as e:
             native_error = e
             print(f"[Z-Image POC] Native single-file loader fallback due to: {e}")
@@ -853,6 +966,8 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
                     dtype,
                     prefer_single_file_aux_weights=prefer_single_file_aux_weights,
                 )
+                if pipeline is not None and _pipeline_has_meta_tensors(pipeline):
+                    raise RuntimeError("split-loader produced meta tensors")
             except Exception as e:
                 split_error = e
                 print(f"[Z-Image POC] Split-loader fallback due to: {e}")
@@ -895,6 +1010,9 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
             raise RuntimeError("Failed to build Z-Image pipeline from single-file checkpoint.")
     else:
         raise ValueError(f"Unsupported source kind: {source_kind}")
+
+    if _pipeline_has_meta_tensors(pipeline):
+        raise RuntimeError("Z-Image pipeline contains meta tensors after load.")
 
     pipeline.set_progress_bar_config(disable=True)
     generator_device, used_offload = _prepare_pipeline_memory_mode(pipeline, device)
@@ -940,7 +1058,10 @@ def generate_zimage(
 ):
     import torch
 
+    cache_key = f"{source_kind}:{os.path.abspath(source_path)}"
     pipeline, generator_device, used_offload = _load_pipeline(source_kind, source_path, flavor, checkpoint_folders)
+    if generator_device == "cuda":
+        torch.cuda.empty_cache()
     generator = torch.Generator(device=generator_device).manual_seed(seed)
 
     # Align scheduler shift with Forge-style "Shift" control when available.
@@ -975,26 +1096,38 @@ def generate_zimage(
     )
 
     try:
-        output = _run_pipeline_call(pipeline, call_kwargs)
-    except RuntimeError as e:
-        msg = str(e).lower()
-        if "out of memory" not in msg or generator_device != "cuda":
-            raise
+        try:
+            output = _run_pipeline_call(pipeline, call_kwargs)
+        except RuntimeError as e:
+            msg = str(e).lower()
+            if "out of memory" not in msg or generator_device != "cuda":
+                raise
 
-        print("[Z-Image POC] CUDA OOM detected, retrying with stricter offload mode.")
-        torch.cuda.empty_cache()
-        if hasattr(pipeline, "enable_sequential_cpu_offload"):
-            pipeline.enable_sequential_cpu_offload()
-            used_offload = True
-        if hasattr(pipeline, "enable_attention_slicing"):
-            pipeline.enable_attention_slicing("max")
-        if hasattr(pipeline, "enable_vae_slicing"):
-            pipeline.enable_vae_slicing()
-        if hasattr(pipeline, "enable_vae_tiling"):
-            pipeline.enable_vae_tiling()
-        if flavor == "turbo" and call_kwargs.get("max_sequence_length", 0) > 192:
-            call_kwargs["max_sequence_length"] = 192
-            print("[Z-Image POC] Retrying with reduced max_sequence_length=192 for lower VRAM usage.")
-        output = _run_pipeline_call(pipeline, call_kwargs)
+            print("[Z-Image POC] CUDA OOM detected, retrying with stricter offload mode.")
+            torch.cuda.empty_cache()
+            if hasattr(pipeline, "enable_sequential_cpu_offload"):
+                pipeline.enable_sequential_cpu_offload()
+                pipeline._zimage_memory_mode = "sequential_offload"
+                used_offload = True
+            if hasattr(pipeline, "enable_attention_slicing"):
+                pipeline.enable_attention_slicing("max")
+            if hasattr(pipeline, "enable_vae_slicing"):
+                pipeline.enable_vae_slicing()
+            if hasattr(pipeline, "enable_vae_tiling"):
+                pipeline.enable_vae_tiling()
+            if flavor == "turbo" and call_kwargs.get("max_sequence_length", 0) > 192:
+                call_kwargs["max_sequence_length"] = 192
+                print("[Z-Image POC] Retrying with reduced max_sequence_length=192 for lower VRAM usage.")
+            output = _run_pipeline_call(pipeline, call_kwargs)
 
-    return output.images[0]
+        image = output.images[0]
+        del output
+        if generator_device == "cuda":
+            torch.cuda.empty_cache()
+        return image
+    except Exception:
+        # Prevent poisoned/corrupted cache from breaking next generation request.
+        _PIPELINE_CACHE.pop(cache_key, None)
+        if generator_device == "cuda":
+            torch.cuda.empty_cache()
+        raise
