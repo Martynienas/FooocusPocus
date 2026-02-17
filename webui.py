@@ -2,6 +2,7 @@ import gradio as gr
 import random
 import os
 import json
+import html as py_html
 import time
 import shared
 import modules.config
@@ -1799,6 +1800,64 @@ with shared.gradio_root:
                     return matches[0]
 
             return raw_path
+
+        def parse_library_path_payload(path_payload) -> tuple[str, str]:
+            """Parse JS payload that may contain JSON with path/caption."""
+            if isinstance(path_payload, dict):
+                raw_path = path_payload.get('path', '')
+                caption = path_payload.get('caption', '')
+                return str(raw_path or ''), str(caption or '')
+
+            if not isinstance(path_payload, str):
+                return str(path_payload or ''), ''
+
+            payload = path_payload.strip()
+            if not payload:
+                return '', ''
+
+            if payload.startswith('{'):
+                try:
+                    parsed = json.loads(payload)
+                    if isinstance(parsed, dict):
+                        return str(parsed.get('path', '') or ''), str(parsed.get('caption', '') or '')
+                except Exception:
+                    pass
+
+            return payload, ''
+
+        def normalize_selected_paths(selected_paths) -> list[str]:
+            """Normalize and deduplicate selected paths."""
+            normalized = []
+            seen = set()
+
+            for item in selected_paths or []:
+                raw_path, caption = parse_library_path_payload(item)
+                resolved = resolve_library_image_path(raw_path, caption)
+                if not resolved:
+                    continue
+
+                try:
+                    canonical = os.path.realpath(os.path.expanduser(resolved))
+                except Exception:
+                    continue
+
+                if not os.path.isfile(canonical):
+                    continue
+                if canonical in seen:
+                    continue
+
+                normalized.append(canonical)
+                seen.add(canonical)
+
+            return normalized
+
+        def build_selected_list_html(selected_paths: list[str]) -> str:
+            list_html = '<div class="selected-images-list">'
+            for path in selected_paths:
+                filename = py_html.escape(os.path.basename(path) if path else 'Unknown')
+                list_html += f'<div class="selected-image-item"><span class="selected-image-name">{filename}</span></div>'
+            list_html += '</div>'
+            return list_html
         
         def library_refresh_images(search_text=None, filter_tags=None):
             """Refresh the image library gallery."""
@@ -1866,7 +1925,8 @@ with shared.gradio_root:
         
         def library_delete_selected_images(selected_paths):
             """Delete all selected images."""
-            if not selected_paths or len(selected_paths) == 0:
+            selected_paths = normalize_selected_paths(selected_paths)
+            if not selected_paths:
                 print("[Library] No images selected for deletion")
                 return gr.update(), gr.update(), [], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
             
@@ -1893,7 +1953,8 @@ with shared.gradio_root:
         
         def library_update_multiselect(selected_paths):
             """Update UI when multi-selection changes via checkboxes."""
-            count = len(selected_paths) if selected_paths else 0
+            selected_paths = normalize_selected_paths(selected_paths)
+            count = len(selected_paths)
             
             if count == 0:
                 return (
@@ -1905,11 +1966,7 @@ with shared.gradio_root:
                 )
             
             # Build selected images list HTML
-            list_html = '<div class="selected-images-list">'
-            for path in selected_paths:
-                filename = os.path.basename(path) if path else 'Unknown'
-                list_html += f'<div class="selected-image-item"><span class="selected-image-name">{filename}</span></div>'
-            list_html += '</div>'
+            list_html = build_selected_list_html(selected_paths)
             
             count_html = f'<span class="selected-count-badge">{count} image{"s" if count != 1 else ""} selected</span>'
             
@@ -1924,25 +1981,27 @@ with shared.gradio_root:
         def library_multiselect_checkbox(is_selected, image_path, selected_paths):
             """Handle checkbox click for multi-select."""
             print(f"[Library] Checkbox click: is_selected={is_selected}, image_path={image_path}, current_selected={selected_paths}")
-            
+
+            selected_paths = normalize_selected_paths(selected_paths)
             if not image_path:
-                return selected_paths, gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
-            
-            # Parse the JSON data from JavaScript
-            try:
-                import json
-                path_data = json.loads(image_path) if image_path.startswith('{') else {'path': image_path, 'caption': ''}
-                raw_path = path_data.get('path', image_path)
-                caption = path_data.get('caption', '')
-            except (json.JSONDecodeError, TypeError):
-                raw_path = image_path
-                caption = ''
-            
+                count_update, delete_update, list_update, tags_update, save_update = library_update_multiselect(selected_paths)
+                return selected_paths, count_update, delete_update, list_update, tags_update, save_update
+
+            raw_path, caption = parse_library_path_payload(image_path)
             print(f"[Library] Parsed: raw_path={raw_path}, caption={caption}")
             
             # Resolve the path
             resolved_path = resolve_library_image_path(raw_path, caption)
             print(f"[Library] Resolved path: {resolved_path}")
+            if not resolved_path:
+                count_update, delete_update, list_update, tags_update, save_update = library_update_multiselect(selected_paths)
+                return selected_paths, count_update, delete_update, list_update, tags_update, save_update
+
+            resolved_path = os.path.realpath(os.path.expanduser(resolved_path))
+            if not os.path.isfile(resolved_path):
+                print(f"[Library] Ignoring non-file path from checkbox: {resolved_path}")
+                count_update, delete_update, list_update, tags_update, save_update = library_update_multiselect(selected_paths)
+                return selected_paths, count_update, delete_update, list_update, tags_update, save_update
             
             if is_selected:
                 # Add to selection
@@ -1954,34 +2013,15 @@ with shared.gradio_root:
             
             print(f"[Library] Updated selected_paths: {selected_paths}")
             
-            # Update UI
-            count = len(selected_paths)
-            if count == 0:
-                return (
-                    selected_paths,
-                    gr.update(visible=False),
-                    gr.update(visible=False),
-                    gr.update(visible=False, value=''),
-                    gr.update(visible=False),
-                    gr.update(visible=False)
-                )
-            
-            # Build selected images list HTML
-            list_html = '<div class="selected-images-list">'
-            for path in selected_paths:
-                filename = os.path.basename(path) if path else 'Unknown'
-                list_html += f'<div class="selected-image-item"><span class="selected-image-name">{filename}</span></div>'
-            list_html += '</div>'
-            
-            count_html = f'<span class="selected-count-badge">{count} image{"s" if count != 1 else ""} selected</span>'
-            
+            selected_paths = normalize_selected_paths(selected_paths)
+            count_update, delete_update, list_update, tags_update, save_update = library_update_multiselect(selected_paths)
             return (
                 selected_paths,
-                gr.update(value=count_html, visible=True),
-                gr.update(visible=True),
-                gr.update(value=list_html, visible=True),
-                gr.update(visible=True),
-                gr.update(visible=True)
+                count_update,
+                delete_update,
+                list_update,
+                tags_update,
+                save_update
             )
         
         def library_load_settings(image_info):
@@ -2090,7 +2130,8 @@ with shared.gradio_root:
             inputs=[library_gallery, library_selected_paths],
             outputs=[library_selected_image, library_image_info, library_load_settings_btn, 
                      library_delete_btn, library_edit_tags, library_save_tags_btn, library_selected_path,
-                     library_selected_paths, library_selected_count, library_delete_selected_btn, library_selected_list]
+                     library_selected_paths, library_selected_count, library_delete_selected_btn, library_selected_list],
+            _js='() => { if (typeof clearAllSelections === "function") { clearAllSelections(); } }'
         )
         
         # Delete selected images button
@@ -2098,7 +2139,8 @@ with shared.gradio_root:
             library_delete_selected_images,
             inputs=[library_selected_paths],
             outputs=[library_gallery, library_selected_image, library_selected_paths, 
-                     library_selected_count, library_delete_selected_btn, library_selected_list]
+                     library_selected_count, library_delete_selected_btn, library_selected_list],
+            _js='() => { if (typeof clearAllSelections === "function") { clearAllSelections(); } }'
         )
         
         # Checkbox trigger for multi-select

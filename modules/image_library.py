@@ -287,26 +287,52 @@ class ImageLibrary:
             return None
         
         return info.get('metadata', {})
+
+    def _normalize_path(self, filepath: str) -> str:
+        """Return canonical absolute path for a file candidate."""
+        if not filepath:
+            return ''
+        try:
+            return os.path.realpath(os.path.expanduser(str(filepath)))
+        except Exception:
+            return ''
+
+    def _is_within_output_folder(self, filepath: str) -> bool:
+        """Only allow operations inside configured output folder."""
+        output_folder = self._normalize_path(self.get_output_folder())
+        target_path = self._normalize_path(filepath)
+        if not output_folder or not target_path:
+            return False
+        try:
+            return os.path.commonpath([output_folder, target_path]) == output_folder
+        except Exception:
+            return False
     
     def delete_image(self, filepath: str) -> bool:
         """
         Delete an image file.
         """
-        print(f"[ImageLibrary] delete_image called with: {filepath}")
+        normalized_path = self._normalize_path(filepath)
+        print(f"[ImageLibrary] delete_image called with: {normalized_path}")
+
+        if not self._is_within_output_folder(normalized_path):
+            print(f"[ImageLibrary] Refusing to delete outside output folder: {normalized_path}")
+            return False
+
         try:
-            if os.path.exists(filepath):
-                print(f"[ImageLibrary] File exists, removing: {filepath}")
-                os.remove(filepath)
+            if os.path.isfile(normalized_path):
+                print(f"[ImageLibrary] File exists, removing: {normalized_path}")
+                os.remove(normalized_path)
                 # Invalidate cache
                 self._cache = None
                 self._tag_index = {}
-                print(f"[ImageLibrary] Successfully deleted: {filepath}")
+                print(f"[ImageLibrary] Successfully deleted: {normalized_path}")
                 return True
             else:
-                print(f"[ImageLibrary] File does not exist: {filepath}")
+                print(f"[ImageLibrary] File does not exist: {normalized_path}")
             return False
         except Exception as e:
-            print(f"[ImageLibrary] Error deleting {filepath}: {e}")
+            print(f"[ImageLibrary] Error deleting {normalized_path}: {e}")
             return False
     
     def delete_images(self, filepaths: list[str]) -> tuple[int, list[str]]:
@@ -316,12 +342,25 @@ class ImageLibrary:
         """
         success_count = 0
         failed_paths = []
-        
-        print(f"[ImageLibrary] delete_images called with {len(filepaths)} files")
-        
-        for filepath in filepaths:
+
+        unique_paths = []
+        seen = set()
+        for filepath in filepaths or []:
+            normalized = self._normalize_path(filepath)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            unique_paths.append(normalized)
+
+        print(f"[ImageLibrary] delete_images called with {len(unique_paths)} unique files")
+
+        for filepath in unique_paths:
+            if not self._is_within_output_folder(filepath):
+                failed_paths.append(filepath)
+                print(f"[ImageLibrary] Refusing to delete outside output folder: {filepath}")
+                continue
             try:
-                if os.path.exists(filepath):
+                if os.path.isfile(filepath):
                     os.remove(filepath)
                     success_count += 1
                     print(f"[ImageLibrary] Successfully deleted: {filepath}")
@@ -337,7 +376,7 @@ class ImageLibrary:
             self._cache = None
             self._tag_index = {}
         
-        print(f"[ImageLibrary] Deleted {success_count}/{len(filepaths)} files")
+        print(f"[ImageLibrary] Deleted {success_count}/{len(unique_paths)} files")
         return success_count, failed_paths
     
     def get_image_count(self) -> int:

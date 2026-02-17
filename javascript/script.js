@@ -270,8 +270,58 @@ function htmlDecode(input) {
  * - Click on checkbox -> Toggle multi-select for that image
  * - When multiple images selected -> Show list of selected images, no preview
  */
-var librarySelectedImages = new Set();  // Stores image indices
-var libraryImagePaths = [];  // Maps index to path
+var librarySelectedImages = new Set();  // Stores stable image path keys
+var libraryImagePaths = [];  // Maps index to serialized {path, caption}
+
+function normalizeLibraryPath(value) {
+    if (!value) return '';
+    let normalized = String(value).trim();
+    if (!normalized) return '';
+
+    if (normalized.includes('/file=')) {
+        normalized = normalized.split('/file=')[1] || normalized;
+    }
+
+    const hashIndex = normalized.indexOf('#');
+    if (hashIndex >= 0) normalized = normalized.slice(0, hashIndex);
+    const queryIndex = normalized.indexOf('?');
+    if (queryIndex >= 0) normalized = normalized.slice(0, queryIndex);
+
+    try {
+        normalized = decodeURIComponent(normalized);
+    } catch (e) {
+        // Keep original if decode fails
+    }
+    return normalized.trim();
+}
+
+function parsePathData(pathData) {
+    if (!pathData) return { path: '', caption: '', key: '' };
+    try {
+        const parsed = typeof pathData === 'string' ? JSON.parse(pathData) : pathData;
+        const path = normalizeLibraryPath(parsed.path || '');
+        const caption = normalizeLibraryPath(parsed.caption || '');
+        const key = caption || path;
+        return { path: path, caption: caption, key: key };
+    } catch (e) {
+        const fallback = normalizeLibraryPath(pathData);
+        return { path: fallback, caption: '', key: fallback };
+    }
+}
+
+function pruneSelectionToCurrentGallery() {
+    const validKeys = new Set(
+        libraryImagePaths
+            .map(function(pathData) { return parsePathData(pathData).key; })
+            .filter(function(key) { return !!key; })
+    );
+
+    Array.from(librarySelectedImages).forEach(function(key) {
+        if (!validKeys.has(key)) {
+            librarySelectedImages.delete(key);
+        }
+    });
+}
 
 // Initialize multiselect functionality when UI loads
 onUiLoaded(function() {
@@ -299,11 +349,14 @@ function setupGalleryHandlers() {
     
     // Get all image paths from the gallery
     updateImagePaths(gallery);
+    pruneSelectionToCurrentGallery();
     
     // Add checkbox elements and handlers to thumbnails
     const thumbnails = gallery.querySelectorAll('.thumbnail-item');
     thumbnails.forEach(function(thumb, index) {
         thumb.dataset.imageIndex = index;
+        const pathData = libraryImagePaths[index] || '';
+        const imageKey = parsePathData(pathData).key;
         
         // Add checkbox element if not already present
         let checkbox = thumb.querySelector('.library-checkbox');
@@ -319,7 +372,7 @@ function setupGalleryHandlers() {
                 e.stopPropagation();
                 e.stopImmediatePropagation();
                 
-                toggleThumbnailSelection(thumb, index);
+                toggleThumbnailSelection(thumb, imageKey);
                 
                 // Communicate with Python via hidden inputs
                 const pathInput = document.getElementById('library_checkbox_path');
@@ -347,13 +400,29 @@ function setupGalleryHandlers() {
                 return false;
             }, true);
         }
+
+        // Single click on tile switches to single-select mode, so clear multiselect state.
+        if (!thumb.dataset.singleSelectHandlerAttached) {
+            thumb.dataset.singleSelectHandlerAttached = '1';
+            thumb.addEventListener('click', function(e) {
+                if (e.target.closest('.library-checkbox')) {
+                    return;
+                }
+                clearAllSelections();
+            }, true);
+        }
         
         // Restore selection state
-        if (librarySelectedImages.has(index)) {
+        if (imageKey && librarySelectedImages.has(imageKey)) {
             thumb.classList.add('selected');
             checkbox.classList.add('checked');
+        } else {
+            thumb.classList.remove('selected');
+            checkbox.classList.remove('checked');
         }
     });
+
+    updateSelectedCountDisplay();
 }
 
 function updateImagePaths(gallery) {
@@ -372,16 +441,7 @@ function updateImagePaths(gallery) {
             
             // Extract path from Gradio file URL
             // Format: /file=/actual/path or /file=path
-            let filePath = src;
-            if (src.includes('/file=')) {
-                filePath = src.split('/file=')[1] || '';
-                // Decode the URL
-                try {
-                    filePath = decodeURIComponent(filePath);
-                } catch (e) {
-                    // Keep original if decode fails
-                }
-            }
+            let filePath = normalizeLibraryPath(src);
             
             // Look for the caption in the thumbnail's text content
             // Gradio gallery captions are often in a separate element
@@ -405,17 +465,18 @@ function updateImagePaths(gallery) {
     });
 }
 
-function toggleThumbnailSelection(thumb, index) {
+function toggleThumbnailSelection(thumb, imageKey) {
+    if (!imageKey) return;
     const checkbox = thumb.querySelector('.library-checkbox');
     
     if (thumb.classList.contains('selected')) {
         thumb.classList.remove('selected');
         if (checkbox) checkbox.classList.remove('checked');
-        librarySelectedImages.delete(index);
+        librarySelectedImages.delete(imageKey);
     } else {
         thumb.classList.add('selected');
         if (checkbox) checkbox.classList.add('checked');
-        librarySelectedImages.add(index);
+        librarySelectedImages.add(imageKey);
     }
     
     // Update the selected count display
@@ -451,10 +512,9 @@ function clearAllSelections() {
 
 function getSelectedPaths() {
     // Return array of paths for selected images
-    return Array.from(librarySelectedImages).map(function(index) {
-        return libraryImagePaths[index];
-    }).filter(function(path) {
-        return path !== undefined;
+    return libraryImagePaths.filter(function(pathData) {
+        const key = parsePathData(pathData).key;
+        return key && librarySelectedImages.has(key);
     });
 }
 
