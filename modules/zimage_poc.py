@@ -169,6 +169,21 @@ def _is_likely_zimage_safetensors(path: str) -> bool:
     return False
 
 
+def _single_file_has_text_encoder_weights(path: str) -> bool:
+    if not os.path.isfile(path) or not path.lower().endswith(".safetensors"):
+        return False
+    try:
+        from safetensors import safe_open
+
+        with safe_open(path, framework="pt", device="cpu") as f:
+            for key in f.keys():
+                if key.startswith("text_encoders.qwen3_4b.") or key.startswith("text_encoder."):
+                    return True
+    except Exception:
+        return False
+    return False
+
+
 def should_use_zimage_checkpoint(name: str, checkpoint_folders: list[str]) -> bool:
     if is_zimage_checkpoint_name(name):
         return True
@@ -212,11 +227,28 @@ def _find_local_repo_components(flavor: str, checkpoint_folders: list[str]) -> O
     return None
 
 
-def _ensure_single_file_component_dir(flavor: str, checkpoint_folders: list[str]) -> str:
+def _download_repo_components(repo_id: str, local_config: str, patterns: list[str], missing: list[str]) -> None:
+    from huggingface_hub import snapshot_download
+
+    print(f"[Z-Image POC] Downloading missing components: {', '.join(missing)}")
+    snapshot_download(
+        repo_id=repo_id,
+        local_dir=local_config,
+        local_dir_use_symlinks=False,
+        allow_patterns=patterns,
+    )
+
+
+def _ensure_single_file_component_dir(
+    flavor: str,
+    checkpoint_folders: list[str],
+    single_file_path: Optional[str] = None,
+) -> tuple[str, bool]:
     """
     Prepare a local component directory for single-file Z-Image loading.
     Policy:
     - tokenizer + text_encoder + vae + scheduler may be auto-downloaded if missing.
+    - when single-file already includes text-encoder weights, prefer config-only text_encoder bootstrap.
     """
     local_config = _find_local_repo_components(flavor, checkpoint_folders)
     repo_id = _repo_for_flavor(flavor)
@@ -247,9 +279,11 @@ def _ensure_single_file_component_dir(flavor: str, checkpoint_folders: list[str]
             need_tokenizer = True
 
     if not need_tokenizer and not need_text_encoder and not need_vae and not need_scheduler:
-        return local_config
+        return local_config, False
 
-    from huggingface_hub import snapshot_download
+    try_config_only_text_encoder = bool(
+        need_text_encoder and single_file_path and _single_file_has_text_encoder_weights(single_file_path)
+    )
 
     patterns = [
         "model_index.json",
@@ -258,7 +292,10 @@ def _ensure_single_file_component_dir(flavor: str, checkpoint_folders: list[str]
     if need_tokenizer:
         patterns.append("tokenizer/*")
     if need_text_encoder:
-        patterns.append("text_encoder/*")
+        if try_config_only_text_encoder:
+            patterns.append("text_encoder/*.json")
+        else:
+            patterns.append("text_encoder/*")
     if need_vae:
         patterns.append("vae/*")
     if need_scheduler:
@@ -268,19 +305,16 @@ def _ensure_single_file_component_dir(flavor: str, checkpoint_folders: list[str]
     if need_tokenizer:
         missing.append("tokenizer")
     if need_text_encoder:
-        missing.append("text_encoder")
+        if try_config_only_text_encoder:
+            missing.append("text_encoder(config)")
+        else:
+            missing.append("text_encoder")
     if need_vae:
         missing.append("vae")
     if need_scheduler:
         missing.append("scheduler")
-    print(f"[Z-Image POC] Downloading missing components: {', '.join(missing)}")
-    snapshot_download(
-        repo_id=repo_id,
-        local_dir=local_config,
-        local_dir_use_symlinks=False,
-        allow_patterns=patterns,
-    )
-    return local_config
+    _download_repo_components(repo_id, local_config, patterns, missing)
+    return local_config, try_config_only_text_encoder
 
 
 def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) -> None:
@@ -391,7 +425,7 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
         )
     elif source_kind == "single_file":
         if hasattr(DiffusionPipeline, "from_single_file"):
-            local_config = _ensure_single_file_component_dir(flavor, checkpoint_folders)
+            local_config, _ = _ensure_single_file_component_dir(flavor, checkpoint_folders, source_path)
             pipeline = DiffusionPipeline.from_single_file(
                 source_path,
                 config=local_config,
@@ -401,13 +435,33 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
             )
         else:
             # Backend fallback: build local pipeline from components and inject transformer weights.
-            local_config = _ensure_single_file_component_dir(flavor, checkpoint_folders)
-            pipeline = DiffusionPipeline.from_pretrained(
-                local_config,
-                torch_dtype=dtype,
-                trust_remote_code=True,
-                local_files_only=True,
+            local_config, tried_config_only_text_encoder = _ensure_single_file_component_dir(
+                flavor, checkpoint_folders, source_path
             )
+            try:
+                pipeline = DiffusionPipeline.from_pretrained(
+                    local_config,
+                    torch_dtype=dtype,
+                    trust_remote_code=True,
+                    local_files_only=True,
+                )
+            except Exception:
+                if not tried_config_only_text_encoder:
+                    raise
+                # Fallback: some backends require full text_encoder files even when AIO contains weights.
+                repo_id = _repo_for_flavor(flavor)
+                _download_repo_components(
+                    repo_id,
+                    local_config,
+                    patterns=["text_encoder/*"],
+                    missing=["text_encoder(fallback-full)"],
+                )
+                pipeline = DiffusionPipeline.from_pretrained(
+                    local_config,
+                    torch_dtype=dtype,
+                    trust_remote_code=True,
+                    local_files_only=True,
+                )
             _load_transformer_weights_from_single_file(source_path, pipeline)
     else:
         raise ValueError(f"Unsupported source kind: {source_kind}")
