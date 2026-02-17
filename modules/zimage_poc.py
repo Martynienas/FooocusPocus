@@ -740,10 +740,19 @@ def _pipeline_has_meta_tensors(pipeline) -> bool:
         module = getattr(pipeline, name, None)
         if module is None:
             continue
+        has_offload_hook = bool(getattr(module, "_hf_hook", None))
+        if not has_offload_hook:
+            try:
+                has_offload_hook = any(bool(getattr(m, "_hf_hook", None)) for m in module.modules())
+            except Exception:
+                has_offload_hook = False
         try:
             for p in module.parameters():
                 if getattr(p, "is_meta", False):
-                    return True
+                    # With accelerate/diffusers offload hooks, meta tensors are expected.
+                    # Treat only unmanaged meta tensors as corrupted.
+                    if not has_offload_hook:
+                        return True
         except Exception:
             continue
     return False
@@ -1075,6 +1084,9 @@ def generate_zimage(
         pass
 
     max_sequence_length = 256 if flavor == "turbo" else 512
+    forced_max_seq = getattr(pipeline, "_zimage_forced_max_sequence_length", None)
+    if forced_max_seq is not None:
+        max_sequence_length = min(max_sequence_length, int(forced_max_seq))
 
     call_kwargs = dict(
         prompt=prompt,
@@ -1117,6 +1129,7 @@ def generate_zimage(
                 pipeline.enable_vae_tiling()
             if flavor == "turbo" and call_kwargs.get("max_sequence_length", 0) > 192:
                 call_kwargs["max_sequence_length"] = 192
+                pipeline._zimage_forced_max_sequence_length = 192
                 print("[Z-Image POC] Retrying with reduced max_sequence_length=192 for lower VRAM usage.")
             output = _run_pipeline_call(pipeline, call_kwargs)
 
