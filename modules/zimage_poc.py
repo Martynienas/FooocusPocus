@@ -1,9 +1,13 @@
 import json
 import os
+import hashlib
 from typing import Optional
 
 
 _PIPELINE_CACHE = {}
+_TOKENIZER_JSON_SHA256 = {
+    "Tongyi-MAI/Z-Image-Turbo": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+}
 
 
 def _project_root() -> str:
@@ -30,6 +34,14 @@ def _repo_for_flavor(flavor: str) -> str:
     if flavor == "turbo":
         return "Tongyi-MAI/Z-Image-Turbo"
     return "Tongyi-MAI/Z-Image"
+
+
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _read_json(path: str) -> dict:
@@ -204,11 +216,11 @@ def _ensure_single_file_component_dir(flavor: str, checkpoint_folders: list[str]
     """
     Prepare a local component directory for single-file Z-Image loading.
     Policy:
-    - tokenizer must already exist locally (user-provided).
-    - text_encoder + vae + scheduler may be auto-downloaded if missing.
+    - tokenizer + text_encoder + vae + scheduler may be auto-downloaded if missing.
     """
     local_config = _find_local_repo_components(flavor, checkpoint_folders)
-    repo = _repo_for_flavor(flavor).split("/")[-1]
+    repo_id = _repo_for_flavor(flavor)
+    repo = repo_id.split("/")[-1]
     universal_root = _universal_zimage_root()
     preferred_local_config = os.path.join(universal_root, repo)
     os.makedirs(preferred_local_config, exist_ok=True)
@@ -217,26 +229,34 @@ def _ensure_single_file_component_dir(flavor: str, checkpoint_folders: list[str]
         # Use universal repo folder as canonical storage even before it is complete.
         local_config = preferred_local_config
 
-    tokenizer_dir = os.path.join(local_config, "tokenizer")
-    if not os.path.isdir(tokenizer_dir):
-        raise RuntimeError(
-            "Single-file Z-Image requires local tokenizer files. "
-            f"Place tokenizer under: {preferred_local_config}/tokenizer"
-        )
-
+    need_tokenizer = not os.path.isdir(os.path.join(local_config, "tokenizer"))
     need_text_encoder = not os.path.isdir(os.path.join(local_config, "text_encoder"))
     need_vae = not os.path.isdir(os.path.join(local_config, "vae"))
     need_scheduler = not os.path.isdir(os.path.join(local_config, "scheduler"))
-    if not need_text_encoder and not need_vae and not need_scheduler:
+
+    tokenizer_json = os.path.join(local_config, "tokenizer", "tokenizer.json")
+    expected_tokenizer_sha = _TOKENIZER_JSON_SHA256.get(repo_id)
+    if (not need_tokenizer) and expected_tokenizer_sha and os.path.isfile(tokenizer_json):
+        try:
+            current_sha = _sha256_file(tokenizer_json)
+            if current_sha.lower() != expected_tokenizer_sha.lower():
+                print("[Z-Image POC] Local tokenizer checksum mismatch, refreshing tokenizer files.")
+                need_tokenizer = True
+        except Exception as e:
+            print(f"[Z-Image POC] Tokenizer checksum check failed, will refresh tokenizer files: {e}")
+            need_tokenizer = True
+
+    if not need_tokenizer and not need_text_encoder and not need_vae and not need_scheduler:
         return local_config
 
     from huggingface_hub import snapshot_download
 
-    repo_id = _repo_for_flavor(flavor)
     patterns = [
         "model_index.json",
         "transformer/config.json",
     ]
+    if need_tokenizer:
+        patterns.append("tokenizer/*")
     if need_text_encoder:
         patterns.append("text_encoder/*")
     if need_vae:
@@ -245,6 +265,8 @@ def _ensure_single_file_component_dir(flavor: str, checkpoint_folders: list[str]
         patterns.append("scheduler/*")
 
     missing = []
+    if need_tokenizer:
+        missing.append("tokenizer")
     if need_text_encoder:
         missing.append("text_encoder")
     if need_vae:
