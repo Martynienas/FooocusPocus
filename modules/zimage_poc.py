@@ -81,7 +81,62 @@ def _round_up_to_supported_seq(value: int, max_cap: int) -> int:
     return cap
 
 
+def _normalize_prompt_text_for_count(text) -> str:
+    if text is None:
+        return ""
+    if isinstance(text, str):
+        return text
+    if isinstance(text, (list, tuple)):
+        for item in text:
+            if isinstance(item, str) and item.strip():
+                return item
+        if text:
+            return str(text[0])
+        return ""
+    return str(text)
+
+
+def _count_tokens_from_input_ids(ids) -> int:
+    if ids is None:
+        return 0
+
+    shape = getattr(ids, "shape", None)
+    if shape is not None:
+        try:
+            if len(shape) >= 2:
+                return max(0, int(shape[-1]))
+            if len(shape) == 1:
+                return max(0, int(shape[0]))
+        except Exception:
+            pass
+
+    if hasattr(ids, "tolist"):
+        try:
+            return _count_tokens_from_input_ids(ids.tolist())
+        except Exception:
+            pass
+
+    if isinstance(ids, (list, tuple)):
+        if not ids:
+            return 0
+
+        first = ids[0]
+        if isinstance(first, (list, tuple)):
+            return max(0, len(first))
+
+        nested = _count_tokens_from_input_ids(first)
+        if nested > 0:
+            return nested
+        return max(0, len(ids))
+
+    try:
+        return max(0, len(ids))
+    except Exception:
+        return 0
+
+
 def _estimate_prompt_token_count(pipeline, text: str) -> int:
+    text = _normalize_prompt_text_for_count(text)
     tokenizer = getattr(pipeline, "tokenizer", None)
     if tokenizer is not None:
         try:
@@ -93,10 +148,9 @@ def _estimate_prompt_token_count(pipeline, text: str) -> int:
                 return_tensors=None,
             )
             ids = encoded.get("input_ids", []) if isinstance(encoded, dict) else []
-            if ids and isinstance(ids[0], list):
-                ids = ids[0]
-            if isinstance(ids, list):
-                return max(1, len(ids))
+            token_count = _count_tokens_from_input_ids(ids)
+            if token_count > 0:
+                return token_count
         except Exception:
             pass
     # Fallback heuristic if tokenizer is not available.
