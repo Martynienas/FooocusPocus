@@ -377,6 +377,8 @@ def get_file_from_folder_list(name, folders):
         filename = os.path.abspath(os.path.realpath(os.path.join(folder, name)))
         if os.path.isfile(filename):
             return filename
+        if os.path.isdir(filename):
+            return filename
 
     return os.path.abspath(os.path.realpath(os.path.join(folders[0], name)))
 
