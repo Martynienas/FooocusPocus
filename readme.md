@@ -81,17 +81,6 @@ When disabled, wildcard entries are chosen randomly.
 
 ---
 
-## Model Folder Conventions
-
-Custom text encoders are supported.
-
-- Place custom text encoder files/folders under `models/text_encoders/`
-- Recommended for Z-Image/Qwen-style encoders (example filename: `qwen3_4b_fp8_scaled.safetensors`)
-
-`models/text_encoders/` is included as an empty folder by default so clean installs have the expected location.
-
----
-
 ## Download
 
 ### Windows

@@ -2,7 +2,6 @@ import json
 import os
 import hashlib
 import importlib
-import glob
 from typing import Optional
 
 
@@ -35,10 +34,6 @@ def _put_prompt_cache(key: tuple, value: tuple) -> None:
 
 def _universal_zimage_root() -> str:
     return os.path.join(_project_root(), "models", "zimage")
-
-
-def _custom_text_encoder_root() -> str:
-    return os.path.join(_project_root(), "models", "text_encoders")
 
 
 def is_zimage_checkpoint_name(name: str) -> bool:
@@ -283,82 +278,11 @@ def _download_repo_components(repo_id: str, local_config: str, patterns: list[st
     )
 
 
-def _find_custom_text_encoder_source(flavor: str) -> tuple[Optional[str], Optional[str]]:
-    """
-    Custom text encoder lookup location for users:
-      models/text_encoders/
-    Supports:
-      - HF-style folder (contains config.json + weights)
-      - single safetensors file (loaded with local config bootstrap)
-    Returns: (path, kind) where kind is "directory" or "file".
-    """
-    root = _custom_text_encoder_root()
-    if not os.path.isdir(root):
-        return None, None
-
-    repo = _repo_for_flavor(flavor).split("/")[-1].lower()
-    ordered_names = [
-        repo,
-        repo.replace("-", "_"),
-        "z-image-turbo",
-        "z_image_turbo",
-        "zimage_turbo",
-        "z-image",
-        "z_image",
-        "zimage",
-        "qwen3_4b",
-        "qwen3",
-        "text_encoder",
-    ]
-
-    def _weights_in_dir(path: str) -> bool:
-        patterns = (
-            "model.safetensors",
-            "model-*.safetensors",
-            "diffusion_pytorch_model.safetensors",
-            "pytorch_model.bin",
-            "pytorch_model-*.bin",
-            "*.safetensors",
-            "*.bin",
-        )
-        for pattern in patterns:
-            if glob.glob(os.path.join(path, pattern)):
-                return True
-        return False
-
-    # Prefer named directories first.
-    for name in ordered_names:
-        candidate = os.path.join(root, name)
-        if os.path.isdir(candidate) and os.path.isfile(os.path.join(candidate, "config.json")):
-            if _weights_in_dir(candidate):
-                print(f"[Z-Image POC] Using custom text encoder directory: {candidate}")
-                return candidate, "directory"
-
-    # Then any valid directory.
-    for entry in sorted(os.listdir(root), key=str.casefold):
-        candidate = os.path.join(root, entry)
-        if os.path.isdir(candidate) and os.path.isfile(os.path.join(candidate, "config.json")) and _weights_in_dir(candidate):
-            print(f"[Z-Image POC] Using custom text encoder directory: {candidate}")
-            return candidate, "directory"
-
-    # Finally single-file safetensors.
-    for name in ordered_names:
-        candidate = os.path.join(root, f"{name}.safetensors")
-        if os.path.isfile(candidate):
-            print(f"[Z-Image POC] Using custom text encoder file: {candidate}")
-            return candidate, "file"
-    for candidate in sorted(glob.glob(os.path.join(root, "*.safetensors")), key=str.casefold):
-        print(f"[Z-Image POC] Using custom text encoder file: {candidate}")
-        return candidate, "file"
-
-    return None, None
-
-
 def _ensure_single_file_component_dir(
     flavor: str,
     checkpoint_folders: list[str],
     single_file_path: Optional[str] = None,
-) -> tuple[str, bool, Optional[str], Optional[str]]:
+) -> tuple[str, bool]:
     """
     Prepare a local component directory for single-file Z-Image loading.
     Policy:
@@ -376,14 +300,8 @@ def _ensure_single_file_component_dir(
         # Use universal repo folder as canonical storage even before it is complete.
         local_config = preferred_local_config
 
-    custom_text_encoder_path, custom_text_encoder_kind = _find_custom_text_encoder_source(flavor)
-    local_text_encoder_dir = os.path.join(local_config, "text_encoder")
-    local_text_encoder_present = os.path.isdir(local_text_encoder_dir)
-    use_custom_text_encoder_dir = bool(custom_text_encoder_kind == "directory" and custom_text_encoder_path)
-    use_custom_text_encoder_file = bool(custom_text_encoder_kind == "file" and custom_text_encoder_path)
-
     need_tokenizer = not os.path.isdir(os.path.join(local_config, "tokenizer"))
-    need_text_encoder = not local_text_encoder_present and not use_custom_text_encoder_dir
+    need_text_encoder = not os.path.isdir(os.path.join(local_config, "text_encoder"))
     need_vae = not os.path.isdir(os.path.join(local_config, "vae"))
     need_scheduler = not os.path.isdir(os.path.join(local_config, "scheduler"))
 
@@ -400,14 +318,11 @@ def _ensure_single_file_component_dir(
             need_tokenizer = True
 
     if not need_tokenizer and not need_text_encoder and not need_vae and not need_scheduler:
-        return local_config, False, custom_text_encoder_path, custom_text_encoder_kind
+        return local_config, False
 
     try_config_only_text_encoder = bool(
         need_text_encoder and single_file_path and _single_file_has_text_encoder_weights(single_file_path)
     )
-    if need_text_encoder and use_custom_text_encoder_file:
-        # We can bootstrap model from config only and load custom safetensors from models/text_encoders.
-        try_config_only_text_encoder = True
 
     patterns = [
         "model_index.json",
@@ -438,7 +353,7 @@ def _ensure_single_file_component_dir(
     if need_scheduler:
         missing.append("scheduler")
     _download_repo_components(repo_id, local_config, patterns, missing)
-    return local_config, try_config_only_text_encoder, custom_text_encoder_path, custom_text_encoder_kind
+    return local_config, try_config_only_text_encoder
 
 
 def _split_single_file_state_dict(single_file_path: str, include_aux_weights: bool = False) -> dict[str, dict]:
@@ -635,136 +550,6 @@ def _apply_component_state_dict(
     return missing, unexpected
 
 
-def _custom_state_dict_compatibility(state_dict: dict, model_state_dict: dict) -> dict[str, float]:
-    model_keys = set(model_state_dict.keys())
-    total_input = len(state_dict)
-    total_model = len(model_keys)
-    if total_input <= 0 or total_model <= 0:
-        return {
-            "matched": 0.0,
-            "shape_mismatch": 0.0,
-            "unexpected": float(total_input),
-            "match_ratio_input": 0.0,
-            "coverage_ratio_model": 0.0,
-        }
-
-    matched = 0
-    shape_mismatch = 0
-    unexpected = 0
-    for key, tensor in state_dict.items():
-        target = model_state_dict.get(key)
-        if target is None:
-            unexpected += 1
-            continue
-        if tuple(getattr(tensor, "shape", ())) == tuple(getattr(target, "shape", ())):
-            matched += 1
-        else:
-            shape_mismatch += 1
-
-    return {
-        "matched": float(matched),
-        "shape_mismatch": float(shape_mismatch),
-        "unexpected": float(unexpected),
-        "match_ratio_input": float(matched) / float(max(total_input, 1)),
-        "coverage_ratio_model": float(matched) / float(max(total_model, 1)),
-    }
-
-
-def _validate_custom_text_encoder_state_dict(model, state_dict: dict, source_path: str) -> None:
-    model_sd = model.state_dict()
-    stats = _custom_state_dict_compatibility(state_dict, model_sd)
-    matched = int(stats["matched"])
-    shape_mismatch = int(stats["shape_mismatch"])
-    unexpected = int(stats["unexpected"])
-    match_ratio_input = stats["match_ratio_input"]
-    coverage_ratio_model = stats["coverage_ratio_model"]
-    total_input = len(state_dict)
-    total_model = len(model_sd)
-
-    print(
-        "[Z-Image POC] custom text_encoder compatibility: "
-        f"matched={matched}/{total_input} ({match_ratio_input:.2%}), "
-        f"coverage={matched}/{total_model} ({coverage_ratio_model:.2%}), "
-        f"shape_mismatch={shape_mismatch}, unexpected={unexpected}"
-    )
-
-    # Compatibility signal; strict failure can be toggled by env.
-    min_matched = min(256, max(64, int(total_model * 0.35)))
-    incompatible = matched < min_matched or match_ratio_input < 0.45 or coverage_ratio_model < 0.30
-    if not incompatible:
-        return
-
-    strict = os.environ.get("FOOOCUS_ZIMAGE_STRICT_CUSTOM_TEXT_ENCODER", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-    message = (
-        "Custom text encoder appears weakly compatible with Z-Image Turbo. "
-        f"source={source_path}, matched={matched}/{total_input}, coverage={coverage_ratio_model:.2%}. "
-        "Use a matching Qwen3/Z-Image text encoder for best results."
-    )
-    if strict:
-        raise RuntimeError(message)
-    print(f"[Z-Image POC] WARNING: {message} Continuing in permissive mode.")
-
-
-def _find_custom_vae_file(vae_dir: str) -> Optional[str]:
-    if not os.path.isdir(vae_dir):
-        return None
-    preferred = os.path.join(vae_dir, "ae.safetensors")
-    if os.path.isfile(preferred):
-        return preferred
-    for cand in sorted(glob.glob(os.path.join(vae_dir, "*.safetensors")), key=str.casefold):
-        base = os.path.basename(cand).lower()
-        if base not in ("diffusion_pytorch_model.safetensors", "model.safetensors"):
-            return cand
-    return None
-
-
-def _load_custom_vae_state_dict(path: str) -> dict:
-    from safetensors import safe_open
-
-    prefixes = ["vae.", "first_stage_model.", "first_stage_model.model.", "autoencoder.", "model."]
-    state_dict = {}
-    with safe_open(path, framework="pt", device="cpu") as f:
-        for key in f.keys():
-            mapped = key
-            for pref in prefixes:
-                if key.startswith(pref):
-                    mapped = key[len(pref):]
-                    break
-            state_dict[mapped] = f.get_tensor(key)
-    return state_dict
-
-
-def _validate_custom_vae_state_dict(model, state_dict: dict, source_path: str) -> None:
-    model_sd = model.state_dict()
-    stats = _custom_state_dict_compatibility(state_dict, model_sd)
-    matched = int(stats["matched"])
-    shape_mismatch = int(stats["shape_mismatch"])
-    unexpected = int(stats["unexpected"])
-    match_ratio_input = stats["match_ratio_input"]
-    coverage_ratio_model = stats["coverage_ratio_model"]
-    total_input = len(state_dict)
-    total_model = len(model_sd)
-
-    print(
-        "[Z-Image POC] custom vae compatibility: "
-        f"matched={matched}/{total_input} ({match_ratio_input:.2%}), "
-        f"coverage={matched}/{total_model} ({coverage_ratio_model:.2%}), "
-        f"shape_mismatch={shape_mismatch}, unexpected={unexpected}"
-    )
-
-    min_matched = min(192, max(48, int(total_model * 0.30)))
-    if matched < min_matched or match_ratio_input < 0.35 or coverage_ratio_model < 0.25:
-        raise RuntimeError(
-            "Custom VAE appears incompatible with current Z-Image VAE architecture. "
-            f"Matched {matched}/{total_input} tensors, model coverage {coverage_ratio_model:.2%}."
-        )
-
-
 def _remap_state_dict_to_model_keys(state_dict: dict, model_keys: set[str], label: str, verbose: bool = True) -> dict:
     if not state_dict:
         return state_dict
@@ -835,8 +620,6 @@ def _build_pipeline_from_single_file_components(
     single_file_path: str,
     dtype,
     prefer_single_file_aux_weights: bool = False,
-    custom_text_encoder_path: Optional[str] = None,
-    custom_text_encoder_kind: Optional[str] = None,
 ):
     from diffusers import DiffusionPipeline
     from transformers import AutoConfig, AutoModel
@@ -872,23 +655,9 @@ def _build_pipeline_from_single_file_components(
             continue
 
         want_single_file_weights = bool(parts.get(component_name))
-        if component_name == "text_encoder" and custom_text_encoder_kind == "directory" and custom_text_encoder_path:
-            comp_path = custom_text_encoder_path
-        custom_vae_file = _find_custom_vae_file(comp_path) if component_name == "vae" else None
-
         if component_name == "text_encoder" and want_single_file_weights:
             config = AutoConfig.from_pretrained(comp_path, local_files_only=True, trust_remote_code=True)
             model = AutoModel.from_config(config, trust_remote_code=True)
-        elif component_name == "vae" and custom_vae_file and not want_single_file_weights:
-            if hasattr(cls, "load_config") and hasattr(cls, "from_config"):
-                model = cls.from_config(cls.load_config(comp_path))
-            else:
-                model = _call_with_dtype_compat(
-                    cls.from_pretrained,
-                    dtype,
-                    {"pretrained_model_name_or_path": comp_path, "local_files_only": True},
-                    f"{component_name}.from_pretrained",
-                )
         elif want_single_file_weights:
             if hasattr(cls, "load_config") and hasattr(cls, "from_config"):
                 model = cls.from_config(cls.load_config(comp_path))
@@ -906,57 +675,6 @@ def _build_pipeline_from_single_file_components(
                 {"pretrained_model_name_or_path": comp_path, "local_files_only": True},
                 f"{component_name}.from_pretrained",
             )
-
-        if (
-            component_name == "text_encoder"
-            and not want_single_file_weights
-            and custom_text_encoder_kind == "file"
-            and custom_text_encoder_path
-        ):
-            try:
-                from safetensors import safe_open
-
-                external_sd = {}
-                text_prefixes = ["text_encoders.qwen3_4b.", "text_encoder.", "qwen3_4b.transformer.", "qwen3_4b."]
-                with safe_open(custom_text_encoder_path, framework="pt", device="cpu") as f:
-                    for key in f.keys():
-                        added = False
-                        for pref in text_prefixes:
-                            if key.startswith(pref):
-                                external_sd[key[len(pref):]] = f.get_tensor(key)
-                                added = True
-                                break
-                        if not added:
-                            external_sd[key] = f.get_tensor(key)
-                model_keys = set(model.state_dict().keys())
-                external_sd = _remap_state_dict_to_model_keys(external_sd, model_keys, "text_encoder(custom)")
-                _validate_custom_text_encoder_state_dict(model, external_sd, custom_text_encoder_path)
-                _apply_component_state_dict(
-                    model,
-                    external_sd,
-                    label="text_encoder(custom)",
-                    missing_limit=None,
-                    unexpected_limit=None,
-                )
-            except Exception as e:
-                raise RuntimeError(f"Failed custom text_encoder load from {custom_text_encoder_path}: {e}") from e
-
-        if component_name == "vae" and custom_vae_file and not want_single_file_weights:
-            try:
-                external_sd = _load_custom_vae_state_dict(custom_vae_file)
-                model_keys = set(model.state_dict().keys())
-                external_sd = _remap_state_dict_to_model_keys(external_sd, model_keys, "vae(custom)")
-                _validate_custom_vae_state_dict(model, external_sd, custom_vae_file)
-                _apply_component_state_dict(
-                    model,
-                    external_sd,
-                    label="vae(custom)",
-                    missing_limit=max(192, int(len(model_keys) * 0.45)),
-                    unexpected_limit=max(192, int(len(model_keys) * 0.45)),
-                )
-                print(f"[Z-Image POC] Using custom VAE file: {custom_vae_file}")
-            except Exception as e:
-                raise RuntimeError(f"Failed custom VAE load from {custom_vae_file}: {e}") from e
 
         if hasattr(model, "to"):
             model = model.to(dtype=dtype)
@@ -1234,12 +952,7 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
             "DiffusionPipeline.from_pretrained(directory)",
         )
     elif source_kind == "single_file":
-        (
-            local_config,
-            tried_config_only_text_encoder,
-            custom_text_encoder_path,
-            custom_text_encoder_kind,
-        ) = _ensure_single_file_component_dir(
+        local_config, tried_config_only_text_encoder = _ensure_single_file_component_dir(
             flavor, checkpoint_folders, source_path
         )
 
@@ -1279,8 +992,6 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
                     source_path,
                     dtype,
                     prefer_single_file_aux_weights=prefer_single_file_aux_weights,
-                    custom_text_encoder_path=custom_text_encoder_path,
-                    custom_text_encoder_kind=custom_text_encoder_kind,
                 )
                 if pipeline is not None and _pipeline_has_meta_tensors(pipeline):
                     raise RuntimeError("split-loader produced meta tensors")
