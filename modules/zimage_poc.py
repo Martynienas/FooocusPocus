@@ -149,41 +149,24 @@ def should_use_zimage_checkpoint(name: str, checkpoint_folders: list[str]) -> bo
     return _is_likely_zimage_safetensors(resolved)
 
 
-def ensure_zimage_repo_download(flavor: str, checkpoint_folders: list[str]) -> str:
-    from huggingface_hub import snapshot_download
+def _find_local_repo_components(flavor: str, checkpoint_folders: list[str]) -> Optional[str]:
+    repo = _repo_for_flavor(flavor).split("/")[-1]
+    candidates = [repo, repo.lower(), repo.replace("-", "_").lower()]
 
-    if not checkpoint_folders:
-        raise RuntimeError("No checkpoint folders configured.")
+    for folder in checkpoint_folders:
+        for cand in candidates:
+            path = os.path.abspath(os.path.realpath(os.path.join(folder, cand)))
+            if is_zimage_model_directory(path):
+                return path
+        # Also support nested mirrors like Tongyi-MAI/Z-Image-Turbo.
+        nested = os.path.abspath(os.path.realpath(os.path.join(folder, "Tongyi-MAI", repo)))
+        if is_zimage_model_directory(nested):
+            return nested
 
-    base_dir = os.path.abspath(checkpoint_folders[0])
-    repo_id = _repo_for_flavor(flavor)
-    relative = repo_id.replace("/", os.sep)
-    local_dir = os.path.join(base_dir, relative)
-    os.makedirs(local_dir, exist_ok=True)
-
-    if is_zimage_model_directory(local_dir):
-        return local_dir
-
-    snapshot_download(
-        repo_id=repo_id,
-        local_dir=local_dir,
-        local_dir_use_symlinks=False,
-        allow_patterns=[
-            "model_index.json",
-            "transformer/*",
-            "text_encoder/*",
-            "tokenizer/*",
-            "vae/*",
-            "scheduler/*",
-        ],
-    )
-
-    if not is_zimage_model_directory(local_dir):
-        raise RuntimeError(f"Downloaded {repo_id}, but model layout is incomplete at: {local_dir}")
-    return local_dir
+    return None
 
 
-def resolve_zimage_source(name: str, checkpoint_folders: list[str], auto_download_if_missing: bool = True) -> tuple[Optional[str], Optional[str], str]:
+def resolve_zimage_source(name: str, checkpoint_folders: list[str], auto_download_if_missing: bool = False) -> tuple[Optional[str], Optional[str], str]:
     flavor = detect_zimage_flavor(name)
     resolved = _resolve_named_path(name, checkpoint_folders)
 
@@ -192,10 +175,6 @@ def resolve_zimage_source(name: str, checkpoint_folders: list[str], auto_downloa
             return "directory", resolved, flavor
         if os.path.isfile(resolved) and _is_likely_zimage_safetensors(resolved):
             return "single_file", resolved, flavor
-
-    if auto_download_if_missing and is_zimage_checkpoint_name(name):
-        downloaded = ensure_zimage_repo_download(flavor, checkpoint_folders)
-        return "directory", downloaded, flavor
 
     return None, None, flavor
 
@@ -224,28 +203,28 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
             source_path,
             torch_dtype=dtype,
             trust_remote_code=True,
-            local_files_only=False,
+            local_files_only=True,
         )
     elif source_kind == "single_file":
         if hasattr(DiffusionPipeline, "from_single_file"):
+            local_config = _find_local_repo_components(flavor, checkpoint_folders)
+            if local_config is None:
+                raise RuntimeError(
+                    "Single-file Z-Image requires local components (text_encoder/tokenizer/vae/scheduler). "
+                    "Provide a local Z-Image model folder in your checkpoint paths."
+                )
             pipeline = DiffusionPipeline.from_single_file(
                 source_path,
-                config=_repo_for_flavor(flavor),
+                config=local_config,
                 torch_dtype=dtype,
                 trust_remote_code=True,
-                local_files_only=False,
+                local_files_only=True,
             )
         else:
-            fallback_dir = ensure_zimage_repo_download(flavor, checkpoint_folders)
-            pipeline = DiffusionPipeline.from_pretrained(
-                fallback_dir,
-                torch_dtype=dtype,
-                trust_remote_code=True,
-                local_files_only=False,
+            raise RuntimeError(
+                "Single-file Z-Image is not supported by current backend. "
+                "Use a local full Z-Image model folder."
             )
-            source_kind = "directory"
-            source_path = fallback_dir
-            cache_key = f"{source_kind}:{os.path.abspath(source_path)}"
     else:
         raise ValueError(f"Unsupported source kind: {source_kind}")
 

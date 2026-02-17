@@ -898,7 +898,7 @@ def worker():
         source_kind, source_path, flavor = modules.zimage_poc.resolve_zimage_source(
             async_task.base_model_name,
             modules.config.paths_checkpoints,
-            auto_download_if_missing=True,
+            auto_download_if_missing=False,
         )
         if source_path is None:
             progressbar(async_task, 100, f'Z-Image model source not found: {async_task.base_model_name}')
