@@ -185,6 +185,7 @@ def worker():
     import modules.core as core
     import modules.flags as flags
     import modules.patch
+    import modules.zimage_poc
     import ldm_patched.modules.model_management
     import extras.preprocessors as preprocessors
     import modules.inpaint_worker as inpaint_worker
@@ -871,6 +872,113 @@ def worker():
         async_task.adm_scaler_end = 0.0
         return current_progress
 
+    def apply_zimage_turbo_defaults(async_task):
+        flavor = modules.zimage_poc.detect_zimage_flavor(async_task.base_model_name)
+        if flavor != 'turbo':
+            return
+
+        print('Enter Z-Image Turbo mode.')
+        if async_task.refiner_model_name != 'None':
+            print('Refiner disabled in Z-Image Turbo mode.')
+            async_task.refiner_model_name = 'None'
+
+        async_task.sampler_name = 'euler'
+        async_task.scheduler_name = 'sgm_uniform'
+        async_task.cfg_scale = 1.0
+        async_task.adaptive_cfg = 1.0
+        async_task.sharpness = 0.0
+        async_task.refiner_switch = 1.0
+        async_task.adm_scaler_positive = 1.0
+        async_task.adm_scaler_negative = 1.0
+        async_task.adm_scaler_end = 0.0
+        if async_task.steps > 8:
+            async_task.steps = 4
+
+    def run_zimage_poc(async_task, width, height, current_progress):
+        source_kind, source_path, flavor = modules.zimage_poc.resolve_zimage_source(
+            async_task.base_model_name,
+            modules.config.paths_checkpoints,
+            auto_download_if_missing=True,
+        )
+        if source_path is None:
+            progressbar(async_task, 100, f'Z-Image model source not found: {async_task.base_model_name}')
+            return
+
+        print(f'[Z-Image POC] Source: {source_kind} @ {source_path}')
+
+        unsupported = []
+        if async_task.input_image_checkbox:
+            unsupported.append('image input')
+        if async_task.enhance_checkbox:
+            unsupported.append('enhance')
+        if len(async_task.loras) > 0:
+            unsupported.append('LoRAs')
+        if unsupported:
+            print(f"[Z-Image POC] Ignoring unsupported features: {', '.join(unsupported)}")
+
+        apply_zimage_turbo_defaults(async_task)
+        current_progress = max(current_progress, 2)
+        progressbar(async_task, current_progress, 'Running Z-Image POC generation ...')
+
+        for i in range(async_task.image_number):
+            if async_task.last_stop is not False:
+                break
+
+            if async_task.disable_seed_increment:
+                task_seed = async_task.seed % (constants.MAX_SEED + 1)
+            else:
+                task_seed = (async_task.seed + i) % (constants.MAX_SEED + 1)
+
+            task_rng = random.Random(task_seed)
+            task_prompt = apply_dynamic_prompts(
+                apply_wildcards(async_task.prompt, task_rng, i, async_task.read_wildcards_in_order),
+                task_rng,
+            )
+            task_negative_prompt = apply_dynamic_prompts(
+                apply_wildcards(async_task.negative_prompt, task_rng, i, async_task.read_wildcards_in_order),
+                task_rng,
+            )
+
+            progressbar(async_task, current_progress, f'Generating Z-Image {i + 1}/{async_task.image_number} ...')
+            try:
+                pil_image = modules.zimage_poc.generate_zimage(
+                    source_kind=source_kind,
+                    source_path=source_path,
+                    flavor=flavor,
+                    checkpoint_folders=modules.config.paths_checkpoints,
+                    prompt=task_prompt,
+                    negative_prompt=task_negative_prompt,
+                    width=width,
+                    height=height,
+                    steps=async_task.steps,
+                    guidance_scale=float(async_task.cfg_scale),
+                    seed=task_seed,
+                )
+                np_image = np.array(pil_image)
+            except ModuleNotFoundError as e:
+                progressbar(async_task, 100, f'Z-Image POC requires missing dependency: {e}')
+                print('[Z-Image POC] Install required dependencies with:')
+                print('  python -m pip install -r requirements_versions.txt')
+                return
+            except Exception as e:
+                progressbar(async_task, 100, f'Z-Image generation failed: {e}')
+                print(f'[Z-Image POC] Generation failed: {e}')
+                return
+
+            task = dict(
+                task_seed=task_seed,
+                log_positive_prompt=task_prompt,
+                log_negative_prompt=task_negative_prompt,
+                expansion='',
+                styles=[],
+                positive=[task_prompt],
+                negative=[task_negative_prompt],
+            )
+            progress = int((i + 1) * 100 / float(max(async_task.image_number, 1)))
+            img_paths = save_and_log(async_task, height, [np_image], task, False, width, [], persist_image=True)
+            yield_result(async_task, img_paths, progress, async_task.black_out_nsfw, False,
+                         do_not_show_finished_images=async_task.disable_intermediate_results)
+
     def apply_image_input(async_task, base_model_additional_loras, clip_vision_path, controlnet_canny_path,
                           controlnet_cpds_path, goals, inpaint_head_model_path, inpaint_image, inpaint_mask,
                           inpaint_parameterized,  ip_adapter_face_path, ip_adapter_path, ip_negative_path,
@@ -1133,6 +1241,12 @@ def worker():
 
         width, height = async_task.aspect_ratios_selection.replace('×', ' ').split(' ')[:2]
         width, height = int(width), int(height)
+
+        if modules.zimage_poc.should_use_zimage_checkpoint(async_task.base_model_name, modules.config.paths_checkpoints):
+            print('[Parameters] Z-Image checkpoint detected, using POC path.')
+            run_zimage_poc(async_task, width, height, current_progress)
+            stop_processing(async_task, preparation_start_time)
+            return
 
         skip_prompt_processing = False
 
