@@ -180,6 +180,56 @@ def _find_local_repo_components(flavor: str, checkpoint_folders: list[str]) -> O
     return None
 
 
+def _ensure_single_file_component_dir(flavor: str, checkpoint_folders: list[str]) -> str:
+    """
+    Prepare a local component directory for single-file Z-Image loading.
+    Policy:
+    - text_encoder + tokenizer must already exist locally (user-provided).
+    - vae + scheduler may be auto-downloaded if missing.
+    """
+    local_config = _find_local_repo_components(flavor, checkpoint_folders)
+    if local_config is None:
+        raise RuntimeError(
+            "Single-file Z-Image requires local text components (text_encoder/tokenizer). "
+            "Provide a local Z-Image model folder."
+        )
+
+    text_encoder_dir = os.path.join(local_config, "text_encoder")
+    tokenizer_dir = os.path.join(local_config, "tokenizer")
+    if not os.path.isdir(text_encoder_dir) or not os.path.isdir(tokenizer_dir):
+        raise RuntimeError(
+            "Single-file Z-Image requires local text components (text_encoder/tokenizer). "
+            "Provide a local Z-Image model folder."
+        )
+
+    need_vae = not os.path.isdir(os.path.join(local_config, "vae"))
+    need_scheduler = not os.path.isdir(os.path.join(local_config, "scheduler"))
+    if not need_vae and not need_scheduler:
+        return local_config
+
+    from huggingface_hub import snapshot_download
+
+    repo_id = _repo_for_flavor(flavor)
+    patterns = [
+        "model_index.json",
+        "transformer/config.json",
+    ]
+    if need_vae:
+        patterns.append("vae/*")
+    if need_scheduler:
+        patterns.append("scheduler/*")
+
+    print(f"[Z-Image POC] Downloading missing components: "
+          f"{'vae ' if need_vae else ''}{'scheduler' if need_scheduler else ''}".strip())
+    snapshot_download(
+        repo_id=repo_id,
+        local_dir=local_config,
+        local_dir_use_symlinks=False,
+        allow_patterns=patterns,
+    )
+    return local_config
+
+
 def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) -> None:
     from safetensors.torch import load_file
 
@@ -259,12 +309,7 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
         )
     elif source_kind == "single_file":
         if hasattr(DiffusionPipeline, "from_single_file"):
-            local_config = _find_local_repo_components(flavor, checkpoint_folders)
-            if local_config is None:
-                raise RuntimeError(
-                    "Single-file Z-Image requires local components (text_encoder/tokenizer/vae/scheduler). "
-                    "Provide a local Z-Image model folder in your checkpoint paths."
-                )
+            local_config = _ensure_single_file_component_dir(flavor, checkpoint_folders)
             pipeline = DiffusionPipeline.from_single_file(
                 source_path,
                 config=local_config,
@@ -274,12 +319,7 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
             )
         else:
             # Backend fallback: build local pipeline from components and inject transformer weights.
-            local_config = _find_local_repo_components(flavor, checkpoint_folders)
-            if local_config is None:
-                raise RuntimeError(
-                    "Single-file Z-Image requires local components (text_encoder/tokenizer/vae/scheduler). "
-                    "Provide a local Z-Image model folder."
-                )
+            local_config = _ensure_single_file_component_dir(flavor, checkpoint_folders)
             pipeline = DiffusionPipeline.from_pretrained(
                 local_config,
                 torch_dtype=dtype,
