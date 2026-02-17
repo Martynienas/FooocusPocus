@@ -272,6 +272,10 @@ function htmlDecode(input) {
  */
 var librarySelectedImages = new Set();  // Stores stable image path keys
 var libraryImagePaths = [];  // Maps index to serialized {path, caption}
+var librarySetupTimer = null;
+var libraryGalleryObserver = null;
+var observedLibraryGallery = null;
+var libraryBootstrapTimer = null;
 
 function normalizeLibraryPath(value) {
     if (!value) return '';
@@ -329,23 +333,50 @@ onUiLoaded(function() {
 });
 
 function initLibraryMultiselect() {
-    // Watch for the library gallery to be added/modified
-    const observer = new MutationObserver(function(mutations) {
+    // The gallery may render slightly after initial UI load; retry until found.
+    scheduleLibrarySetup(300);
+    if (libraryBootstrapTimer) {
+        clearInterval(libraryBootstrapTimer);
+    }
+    libraryBootstrapTimer = setInterval(function() {
         const gallery = document.getElementById('library_gallery');
-        if (gallery) {
-            setupGalleryHandlers();
+        if (!gallery) return;
+        clearInterval(libraryBootstrapTimer);
+        libraryBootstrapTimer = null;
+        scheduleLibrarySetup(50);
+    }, 1000);
+}
+
+function scheduleLibrarySetup(delayMs) {
+    clearTimeout(librarySetupTimer);
+    librarySetupTimer = setTimeout(function() {
+        setupGalleryHandlers();
+    }, delayMs || 80);
+}
+
+function ensureLibraryGalleryObserver(gallery) {
+    if (observedLibraryGallery === gallery && libraryGalleryObserver) return;
+
+    if (libraryGalleryObserver) {
+        libraryGalleryObserver.disconnect();
+    }
+
+    observedLibraryGallery = gallery;
+    libraryGalleryObserver = new MutationObserver(function(mutations) {
+        const hasStructuralChange = mutations.some(function(m) {
+            return m.type === 'childList' && (m.addedNodes.length > 0 || m.removedNodes.length > 0);
+        });
+        if (hasStructuralChange) {
+            scheduleLibrarySetup(60);
         }
     });
-    
-    observer.observe(document.body, { childList: true, subtree: true });
-    
-    // Initial setup
-    setTimeout(setupGalleryHandlers, 500);
+    libraryGalleryObserver.observe(gallery, { childList: true, subtree: true });
 }
 
 function setupGalleryHandlers() {
     const gallery = document.getElementById('library_gallery');
     if (!gallery) return;
+    ensureLibraryGalleryObserver(gallery);
     
     // Get all image paths from the gallery
     updateImagePaths(gallery);
@@ -371,8 +402,11 @@ function setupGalleryHandlers() {
                 e.preventDefault();
                 e.stopPropagation();
                 e.stopImmediatePropagation();
-                
-                toggleThumbnailSelection(thumb, imageKey);
+
+                const currentIndex = Number(thumb.dataset.imageIndex);
+                const currentPathData = Number.isInteger(currentIndex) && currentIndex >= 0 ? (libraryImagePaths[currentIndex] || '') : '';
+                const currentImageKey = parsePathData(currentPathData).key;
+                toggleThumbnailSelection(thumb, currentImageKey);
                 
                 // Communicate with Python via hidden inputs
                 const pathInput = document.getElementById('library_checkbox_path');
@@ -380,17 +414,8 @@ function setupGalleryHandlers() {
                 const triggerBtn = document.getElementById('library_checkbox_trigger');
                 
                 if (pathInput && selectedInput && triggerBtn) {
-                    // Get the image path - use the stored path which includes caption info
-                    const imagePath = libraryImagePaths[index] || '';
-                    
-                    console.log('[Library] Checkbox clicked:', {
-                        index: index,
-                        imagePath: imagePath,
-                        isSelected: thumb.classList.contains('selected')
-                    });
-                    
                     // Update hidden inputs
-                    pathInput.value = imagePath;
+                    pathInput.value = currentPathData;
                     selectedInput.checked = thumb.classList.contains('selected');
                     
                     // Trigger the hidden button to send data to Python
@@ -459,8 +484,6 @@ function updateImagePaths(gallery) {
                 caption: caption
             });
             libraryImagePaths[index] = pathData;
-            
-            console.log('[Library] Image path ' + index + ':', pathData);
         }
     });
 }
@@ -517,17 +540,6 @@ function getSelectedPaths() {
         return key && librarySelectedImages.has(key);
     });
 }
-
-// Re-apply selections when gallery content changes
-onUiUpdate(function(mutations) {
-    const gallery = document.getElementById('library_gallery');
-    if (gallery) {
-        updateImagePaths(gallery);
-        
-        // Re-apply selection state to thumbnails
-        setTimeout(setupGalleryHandlers, 100);
-    }
-});
 
 // Listen for clear selections event from Python
 document.addEventListener('libraryClearSelections', function() {
