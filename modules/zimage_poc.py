@@ -65,6 +65,13 @@ def _truthy_env(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _zimage_perf_profile() -> str:
+    profile = os.environ.get("FOOOCUS_ZIMAGE_PERF_PROFILE", "safe").strip().lower()
+    if profile not in ("safe", "balanced", "speed"):
+        return "safe"
+    return profile
+
+
 def _round_up_to_supported_seq(value: int, max_cap: int) -> int:
     buckets = [32, 64, 96, 128, 160, 192, 256, 384, 512]
     cap = max(32, int(max_cap))
@@ -957,7 +964,7 @@ def _cuda_total_vram_gb() -> float:
         return 0.0
 
 
-def _choose_memory_mode(device: str) -> tuple[str, float, float, float]:
+def _choose_memory_mode(device: str, profile: str = "safe") -> tuple[str, float, float, float]:
     import torch
 
     if device != "cuda":
@@ -975,10 +982,33 @@ def _choose_memory_mode(device: str) -> tuple[str, float, float, float]:
 
     pressure = (free_vram_gb / total_vram_gb) if total_vram_gb > 0 else 0.0
 
-    # Keep this general for consumer GPUs:
-    # - <=12GB: sequential offload (8GB/10GB/12GB cards)
-    # - <=16GB: model offload (16GB cards)
-    # - >16GB: dynamic by free-memory pressure
+    # Profile-based policy:
+    # safe: maximize stability under low/medium VRAM
+    # balanced: faster default on 10-16GB while keeping fallback room
+    # speed: prefer GPU residency/perf, accept higher OOM risk
+    if profile == "speed":
+        if total_vram_gb > 0 and total_vram_gb <= 8.0:
+            return "sequential_offload", total_vram_gb, free_vram_gb, pressure
+        if total_vram_gb > 0 and total_vram_gb <= 12.0:
+            return "model_offload", total_vram_gb, free_vram_gb, pressure
+        if pressure < 0.10:
+            return "sequential_offload", total_vram_gb, free_vram_gb, pressure
+        if pressure < 0.25:
+            return "model_offload", total_vram_gb, free_vram_gb, pressure
+        return "full_gpu", total_vram_gb, free_vram_gb, pressure
+
+    if profile == "balanced":
+        if total_vram_gb > 0 and total_vram_gb <= 10.0:
+            return "sequential_offload", total_vram_gb, free_vram_gb, pressure
+        if total_vram_gb > 0 and total_vram_gb <= 16.0:
+            return "model_offload", total_vram_gb, free_vram_gb, pressure
+        if pressure < 0.12:
+            return "sequential_offload", total_vram_gb, free_vram_gb, pressure
+        if pressure < 0.30:
+            return "model_offload", total_vram_gb, free_vram_gb, pressure
+        return "full_gpu", total_vram_gb, free_vram_gb, pressure
+
+    # safe profile (default)
     if total_vram_gb > 0 and total_vram_gb <= 12.0:
         return "sequential_offload", total_vram_gb, free_vram_gb, pressure
     if total_vram_gb > 0 and total_vram_gb <= 16.0:
@@ -998,6 +1028,8 @@ def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
     import torch
 
     used_offload = False
+    profile = _zimage_perf_profile()
+    pipeline._zimage_perf_profile = profile
 
     if device == "cuda":
         try:
@@ -1005,15 +1037,31 @@ def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
         except Exception:
             pass
 
-        if hasattr(pipeline, "enable_attention_slicing"):
-            pipeline.enable_attention_slicing("max")
-        if hasattr(pipeline, "enable_vae_slicing"):
-            pipeline.enable_vae_slicing()
-        if hasattr(pipeline, "enable_vae_tiling"):
-            pipeline.enable_vae_tiling()
+        if profile == "safe":
+            if hasattr(pipeline, "enable_attention_slicing"):
+                pipeline.enable_attention_slicing("max")
+            if hasattr(pipeline, "enable_vae_slicing"):
+                pipeline.enable_vae_slicing()
+            if hasattr(pipeline, "enable_vae_tiling"):
+                pipeline.enable_vae_tiling()
+        elif profile == "balanced":
+            if hasattr(pipeline, "enable_attention_slicing"):
+                try:
+                    pipeline.enable_attention_slicing("auto")
+                except Exception:
+                    pipeline.enable_attention_slicing("max")
+            if hasattr(pipeline, "enable_vae_slicing"):
+                pipeline.enable_vae_slicing()
+        else:
+            # speed profile: avoid forcing slicing/tiling if possible
+            if hasattr(pipeline, "disable_attention_slicing"):
+                try:
+                    pipeline.disable_attention_slicing()
+                except Exception:
+                    pass
 
         current_mode = getattr(pipeline, "_zimage_memory_mode", "unset")
-        target_mode, total_vram_gb, free_vram_gb, pressure = _choose_memory_mode(device)
+        target_mode, total_vram_gb, free_vram_gb, pressure = _choose_memory_mode(device, profile=profile)
 
         # Do not relax memory mode for a cached pipeline:
         # keep the strictest mode already proven stable.
@@ -1028,7 +1076,7 @@ def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
             used_offload = True
             print(
                 f"[Z-Image POC] Using sequential CPU offload "
-                f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f})."
+                f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f}, profile={profile})."
             )
         elif target_mode in ("model_offload", "sequential_offload") and hasattr(pipeline, "enable_model_cpu_offload"):
             pipeline.enable_model_cpu_offload()
@@ -1036,7 +1084,7 @@ def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
             used_offload = True
             print(
                 f"[Z-Image POC] Using model CPU offload "
-                f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f})."
+                f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f}, profile={profile})."
             )
         else:
             if current_mode in ("sequential_offload", "model_offload"):
@@ -1047,7 +1095,7 @@ def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
                 pipeline._zimage_memory_mode = "full_gpu"
             print(
                 f"[Z-Image POC] Using full-GPU mode "
-                f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f})."
+                f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f}, profile={profile})."
             )
     else:
         pipeline.to(device)
@@ -1100,8 +1148,14 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
             _PIPELINE_CACHE.pop(cache_key, None)
             _clear_prompt_cache_for_pipeline(cache_key)
             return _load_pipeline(source_kind, source_path, flavor, checkpoint_folders)
+        current_profile = _zimage_perf_profile()
+        cached_profile = getattr(pipeline, "_zimage_perf_profile", "safe")
+        if current_profile != cached_profile:
+            device, _ = _pick_device_and_dtype()
+            generator_device, used_offload = _prepare_pipeline_memory_mode(pipeline, device)
+            _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
         # Keep cached memory mode for throughput; mode hardening is handled at load/OOM time.
-        return pipeline, generator_device, used_offload
+        return _PIPELINE_CACHE[cache_key]
 
     from diffusers import DiffusionPipeline
 
@@ -1270,9 +1324,11 @@ def generate_zimage(
     import torch
 
     cache_key = f"{source_kind}:{os.path.abspath(source_path)}"
+    profile = _zimage_perf_profile()
     pipeline, generator_device, used_offload = _load_pipeline(source_kind, source_path, flavor, checkpoint_folders)
     if generator_device == "cuda":
-        _cleanup_memory(cuda=True, aggressive=False)
+        if profile != "speed":
+            _cleanup_memory(cuda=True, aggressive=False)
     generator = torch.Generator(device=generator_device).manual_seed(seed)
 
     # Align scheduler shift with Forge-style "Shift" control when available.
@@ -1380,7 +1436,8 @@ def generate_zimage(
     )
     print(
         f"[Z-Image POC] Runtime params: steps={steps}, guidance={guidance_scale}, shift={shift}, "
-        f"max_seq={max_sequence_length}, offload={used_offload}, dtype={getattr(pipeline.transformer, 'dtype', 'n/a')}"
+        f"max_seq={max_sequence_length}, offload={used_offload}, dtype={getattr(pipeline.transformer, 'dtype', 'n/a')}, "
+        f"profile={profile}"
     )
 
     output = None
@@ -1455,4 +1512,5 @@ def generate_zimage(
         had_oom = bool(getattr(pipeline, "_zimage_last_oom", False))
         if hasattr(pipeline, "_zimage_last_oom"):
             pipeline._zimage_last_oom = False
-        _cleanup_memory(cuda=(generator_device == "cuda"), aggressive=had_oom)
+        if not (profile == "speed" and not had_oom):
+            _cleanup_memory(cuda=(generator_device == "cuda"), aggressive=had_oom)
