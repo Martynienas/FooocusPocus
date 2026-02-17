@@ -497,6 +497,32 @@ def _remap_state_dict_to_model_keys(state_dict: dict, model_keys: set[str], labe
     return remapped
 
 
+def _call_with_dtype_compat(callable_obj, dtype, kwargs: dict, label: str):
+    errors = []
+
+    if dtype is not None:
+        try:
+            return callable_obj(**{**kwargs, "dtype": dtype})
+        except TypeError as e:
+            errors.append(e)
+        except Exception:
+            raise
+
+        try:
+            return callable_obj(**{**kwargs, "torch_dtype": dtype})
+        except TypeError as e:
+            errors.append(e)
+        except Exception:
+            raise
+
+    try:
+        return callable_obj(**kwargs)
+    except Exception as e:
+        if errors:
+            print(f"[Z-Image POC] {label} dtype-compat fallback after: {errors[-1]}")
+        raise e
+
+
 def _build_pipeline_from_single_file_components(
     local_config: str,
     single_file_path: str,
@@ -545,9 +571,19 @@ def _build_pipeline_from_single_file_components(
             if hasattr(cls, "load_config") and hasattr(cls, "from_config"):
                 model = cls.from_config(cls.load_config(comp_path))
             else:
-                model = cls.from_pretrained(comp_path, local_files_only=True, dtype=dtype)
+                model = _call_with_dtype_compat(
+                    cls.from_pretrained,
+                    dtype,
+                    {"pretrained_model_name_or_path": comp_path, "local_files_only": True},
+                    f"{component_name}.from_pretrained",
+                )
         else:
-            model = cls.from_pretrained(comp_path, local_files_only=True, dtype=dtype)
+            model = _call_with_dtype_compat(
+                cls.from_pretrained,
+                dtype,
+                {"pretrained_model_name_or_path": comp_path, "local_files_only": True},
+                f"{component_name}.from_pretrained",
+            )
 
         if hasattr(model, "to"):
             model = model.to(dtype=dtype)
@@ -771,10 +807,11 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
     device, dtype = _pick_device_and_dtype()
 
     if source_kind == "directory":
-        pipeline = DiffusionPipeline.from_pretrained(
-            source_path,
-            dtype=dtype,
-            local_files_only=True,
+        pipeline = _call_with_dtype_compat(
+            DiffusionPipeline.from_pretrained,
+            dtype,
+            {"pretrained_model_name_or_path": source_path, "local_files_only": True},
+            "DiffusionPipeline.from_pretrained(directory)",
         )
     elif source_kind == "single_file":
         local_config, tried_config_only_text_encoder = _ensure_single_file_component_dir(
@@ -794,10 +831,15 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
                     low_cpu_mem_usage=True,
                 )
                 if not _is_likely_fp8_single_file(source_path):
-                    native_kwargs["dtype"] = dtype
+                    pipeline = _call_with_dtype_compat(
+                        lambda **kwargs: DiffusionPipeline.from_single_file(source_path, **kwargs),
+                        dtype,
+                        native_kwargs,
+                        "DiffusionPipeline.from_single_file",
+                    )
                 else:
                     print("[Z-Image POC] FP8 checkpoint detected, preferring native single-file loader.")
-                pipeline = DiffusionPipeline.from_single_file(source_path, **native_kwargs)
+                    pipeline = DiffusionPipeline.from_single_file(source_path, **native_kwargs)
         except Exception as e:
             native_error = e
             print(f"[Z-Image POC] Native single-file loader fallback due to: {e}")
@@ -818,10 +860,11 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
         if pipeline is None and split_error is not None:
             # Legacy fallback path.
             try:
-                pipeline = DiffusionPipeline.from_pretrained(
-                    local_config,
-                    dtype=dtype,
-                    local_files_only=True,
+                pipeline = _call_with_dtype_compat(
+                    DiffusionPipeline.from_pretrained,
+                    dtype,
+                    {"pretrained_model_name_or_path": local_config, "local_files_only": True},
+                    "DiffusionPipeline.from_pretrained(local_config)",
                 )
             except Exception:
                 if not tried_config_only_text_encoder:
@@ -835,10 +878,11 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
                     missing=["text_encoder(fallback-full)"],
                 )
                 try:
-                    pipeline = DiffusionPipeline.from_pretrained(
-                        local_config,
-                        dtype=dtype,
-                        local_files_only=True,
+                    pipeline = _call_with_dtype_compat(
+                        DiffusionPipeline.from_pretrained,
+                        dtype,
+                        {"pretrained_model_name_or_path": local_config, "local_files_only": True},
+                        "DiffusionPipeline.from_pretrained(local_config-fallback)",
                     )
                 except Exception:
                     raise split_error
