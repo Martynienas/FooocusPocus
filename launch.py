@@ -77,6 +77,54 @@ def _xformers_runtime_healthy() -> bool:
         return False
 
 
+def _cleanup_incompatible_xformers() -> None:
+    try:
+        run(
+            f'"{python}" -m pip uninstall -y xformers',
+            desc="Removing incompatible xformers",
+            errdesc="Couldn't uninstall incompatible xformers",
+            live=True,
+        )
+    except Exception as e:
+        print(e)
+
+    # If metadata is corrupted, pip uninstall may leave files behind.
+    # Best effort: remove lingering xformers package files directly.
+    try:
+        import glob
+        import shutil
+        import site
+
+        roots = []
+        try:
+            roots.extend(site.getsitepackages())
+        except Exception:
+            pass
+        try:
+            user_site = site.getusersitepackages()
+            if user_site:
+                roots.append(user_site)
+        except Exception:
+            pass
+
+        removed_any = False
+        for root in roots:
+            for path in glob.glob(os.path.join(root, "xformers*")):
+                try:
+                    if os.path.isdir(path):
+                        shutil.rmtree(path, ignore_errors=True)
+                        removed_any = True
+                    elif os.path.isfile(path):
+                        os.remove(path)
+                        removed_any = True
+                except Exception as sub_e:
+                    print(f"Failed to remove leftover xformers path {path}: {sub_e}")
+        if removed_any:
+            print("Removed leftover xformers files from site-packages.")
+    except Exception as e:
+        print(f"Best-effort xformers file cleanup skipped: {e}")
+
+
 def prepare_environment():
     torch_index_url = os.environ.get('TORCH_INDEX_URL', "https://download.pytorch.org/whl/cu128")
     torch_command = os.environ.get('TORCH_COMMAND',
@@ -135,7 +183,7 @@ def prepare_environment():
 
             if _installed_dist_version("xformers") is not None and not _xformers_runtime_healthy():
                 print("xformers binary is incompatible with current torch/CUDA stack. Uninstalling xformers and continuing with PyTorch attention.")
-                run_pip("uninstall -y xformers", "xformers cleanup")
+                _cleanup_incompatible_xformers()
 
     if REINSTALL_ALL or not requirements_met(requirements_file):
         run_pip(f"install -r \"{requirements_file}\"", "requirements")
