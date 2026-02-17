@@ -539,6 +539,53 @@ def _pick_device_and_dtype():
     return "cpu", torch.float32
 
 
+def _cuda_total_vram_gb() -> float:
+    import torch
+
+    if not torch.cuda.is_available():
+        return 0.0
+    try:
+        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        return float(props.total_memory) / float(1024**3)
+    except Exception:
+        return 0.0
+
+
+def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
+    """
+    Returns (generator_device, used_offload_mode).
+    generator_device is used to seed torch.Generator.
+    """
+    import torch
+
+    used_offload = False
+
+    if device == "cuda":
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = True
+        except Exception:
+            pass
+
+        if hasattr(pipeline, "enable_attention_slicing"):
+            pipeline.enable_attention_slicing("max")
+        if hasattr(pipeline, "enable_vae_slicing"):
+            pipeline.enable_vae_slicing()
+        if hasattr(pipeline, "enable_vae_tiling"):
+            pipeline.enable_vae_tiling()
+
+        vram_gb = _cuda_total_vram_gb()
+        if vram_gb > 0 and vram_gb <= 12.6 and hasattr(pipeline, "enable_model_cpu_offload"):
+            pipeline.enable_model_cpu_offload()
+            used_offload = True
+            print(f"[Z-Image POC] Using model CPU offload mode for {vram_gb:.2f} GB VRAM.")
+        else:
+            pipeline.to(device)
+    else:
+        pipeline.to(device)
+
+    return ("cuda" if device == "cuda" else "cpu"), used_offload
+
+
 def _ensure_zimage_runtime_compatibility() -> None:
     missing = []
     try:
@@ -669,9 +716,18 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
         raise ValueError(f"Unsupported source kind: {source_kind}")
 
     pipeline.set_progress_bar_config(disable=True)
-    pipeline.to(device)
-    _PIPELINE_CACHE[cache_key] = (pipeline, device)
+    generator_device, used_offload = _prepare_pipeline_memory_mode(pipeline, device)
+    _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
     return _PIPELINE_CACHE[cache_key]
+
+
+def _run_pipeline_call(pipeline, call_kwargs: dict):
+    try:
+        return pipeline(**call_kwargs)
+    except TypeError:
+        call_kwargs = dict(call_kwargs)
+        call_kwargs.pop("negative_prompt", None)
+        return pipeline(**call_kwargs)
 
 
 def generate_zimage(
@@ -689,8 +745,8 @@ def generate_zimage(
 ):
     import torch
 
-    pipeline, device = _load_pipeline(source_kind, source_path, flavor, checkpoint_folders)
-    generator = torch.Generator(device=device).manual_seed(seed)
+    pipeline, generator_device, used_offload = _load_pipeline(source_kind, source_path, flavor, checkpoint_folders)
+    generator = torch.Generator(device=generator_device).manual_seed(seed)
 
     call_kwargs = dict(
         prompt=prompt,
@@ -705,9 +761,23 @@ def generate_zimage(
         call_kwargs["negative_prompt"] = negative_prompt
 
     try:
-        output = pipeline(**call_kwargs)
-    except TypeError:
-        call_kwargs.pop("negative_prompt", None)
-        output = pipeline(**call_kwargs)
+        output = _run_pipeline_call(pipeline, call_kwargs)
+    except RuntimeError as e:
+        msg = str(e).lower()
+        if "out of memory" not in msg or generator_device != "cuda":
+            raise
+
+        print("[Z-Image POC] CUDA OOM detected, retrying with stricter offload mode.")
+        torch.cuda.empty_cache()
+        if hasattr(pipeline, "enable_sequential_cpu_offload"):
+            pipeline.enable_sequential_cpu_offload()
+            used_offload = True
+        if hasattr(pipeline, "enable_attention_slicing"):
+            pipeline.enable_attention_slicing("max")
+        if hasattr(pipeline, "enable_vae_slicing"):
+            pipeline.enable_vae_slicing()
+        if hasattr(pipeline, "enable_vae_tiling"):
+            pipeline.enable_vae_tiling()
+        output = _run_pipeline_call(pipeline, call_kwargs)
 
     return output.images[0]
