@@ -1,7 +1,3 @@
-<div align=center>
-<img src="https://github.com/lllyasviel/Fooocus/assets/19834515/483fb86d-c9a2-4c20-997c-46dafc124f25">
-</div>
-
 # FooocusPocus
 
 **A Quality-of-Life Enhanced Fork of [Fooocus](https://github.com/lllyasviel/Fooocus)**
@@ -10,68 +6,78 @@
 
 ## About This Fork
 
-FooocusPocus is a fork of the amazing [Fooocus](https://github.com/lllyasviel/Fooocus) project by [lllyasviel](https://github.com/lllyasviel). 
+FooocusPocus is a fork of [Fooocus](https://github.com/lllyasviel/Fooocus) by [lllyasviel](https://github.com/lllyasviel).
 
-**Our Goal:** Keep all existing features while enhancing quality of life and user experience. We focus on making Fooocus more comfortable to use without changing its core functionality.
+Goal: keep core Fooocus generation behavior while improving usability, workflow, and configuration quality of life.
 
-**For in-depth capabilities and documentation, please visit the [original Fooocus repository](https://github.com/lllyasviel/Fooocus).**
+For full upstream capability docs, see the [original Fooocus repository](https://github.com/lllyasviel/Fooocus).
 
 ---
 
-## What's New in FooocusPocus
+## Highlights
 
-### 🎛️ Configuration Tab (New!)
+### Image Library (Major Feature)
 
-A dedicated Configuration tab for managing all application settings in one place:
+The Image Library is an in-app browser for generated images with metadata-aware management.
 
-- **Model Folders Management**
-  - Add/remove checkpoint folders without restarting
-  - Add/remove LoRA folders without restarting
-  - Auto-reload models when folders are added
-  - Persistent folder settings across restarts
+- Browse generated images in a dedicated modal gallery
+- Search images by prompt text
+- Filter by tags
+- Single-image preview with full metadata panel
+- Multi-select with checkboxes for bulk operations
+- Unified delete action:
+  - Deletes one image when single-selected
+  - Deletes multiple images when checkbox selection is active
+- Edit tags for one or many images
+- Optional auto-reload when opening the library
 
-- **Default Settings**
-  - Default base model, refiner model, and VAE
-  - Default generation settings (steps, CFG, sharpness, sampler, scheduler)
-  - Default aspect ratio and output format
-  - Default styles selection
+### Configuration Tab
 
-- **Path Configuration**
-  - Output path, temp path
-  - Embeddings, VAE, ControlNet, Upscale model paths
-  - All paths editable with reset buttons
+A dedicated tab for managing runtime settings without manual config editing.
 
-- **Per-Setting Reset**
-  - Each setting has its own "Reset" button
-  - "Restore All to Defaults" for complete reset
-  - Auto-save on every change
+- Add/remove checkpoint folders and LoRA folders
+- Auto-reload models after folder changes
+- Edit key paths (output/temp/embeddings/VAE/ControlNet/upscale)
+- Set generation defaults (steps/CFG/sampler/scheduler/model/style/aspect ratio/output format)
+- Per-setting reset buttons and full restore-to-defaults
+- Auto-save configuration changes
 
-### 🖼️ UI Improvements
+### UI and Workflow Improvements
 
-- **Reorganized Layout**
-  - Prompt inputs moved to left panel for better workflow
-  - Negative prompt repositioned for easier access
-  - Expanded view improvements
+- Prompts are organized for faster day-to-day use
+- Better operation feedback and console logging
+- Random LoRA option for exploration
 
-- **Generation History Navigation**
-  - Previous/Next buttons to browse through generation history
-  - Quick access to past generations and their logs
+---
 
-- **Better Logging**
-  - Enhanced console output for debugging
-  - Progress indicators for model operations
+## Prompt Syntax Reference
 
-### 🎲 Random LoRA Option
+FooocusPocus supports both wildcard placeholders and dynamic prompt groups.
 
-- Select "Random LoRA" from the LoRA dropdown to use a random LoRA from your collection
-- Great for experimentation and discovering new styles
+### 1) Wildcard files (`__name__`)
 
-### 🔧 Bug Fixes
+Use wildcard placeholders in prompts:
 
-- Fixed various Gradio errors
-- Improved model folder handling
-- Better error messages for invalid paths
-- Graceful handling of missing/invalid folders
+- `a portrait of __artist__`
+- `__color__ sports car in __city__`
+
+Wildcard files are loaded from your configured wildcards folder (`path_wildcards`), with one option per line.
+
+### 2) Dynamic choices (`{...}`)
+
+Use inline dynamic groups:
+
+- Single choice: `{red|green|blue}`
+- Single choice (spaces are fine): `{red | green | blue}`
+- Multi-select count: `{2$$red|green|blue|yellow}`
+- Multi-select range: `{1-3$$red|green|blue|yellow}`
+
+Both positive and negative prompts support this syntax.
+
+### 3) Read wildcards in order
+
+When enabled, wildcard file entries are consumed deterministically by index (useful for reproducible batches).  
+When disabled, wildcard entries are chosen randomly.
 
 ---
 
@@ -81,56 +87,49 @@ A dedicated Configuration tab for managing all application settings in one place
 
 You can download FooocusPocus from the [Releases page](https://github.com/Martynienas/FooocusPocus/releases).
 
-After downloading, uncompress and run `run.bat`.
+After downloading, extract and run `run.bat`.
 
 ### System Requirements
 
-- **Minimum:** 4GB Nvidia GPU memory (VRAM) and 8GB system memory (RAM)
-- **Recommended:** 6GB+ VRAM and 16GB+ RAM for optimal performance
+- **Minimum:** 4GB Nvidia GPU VRAM and 8GB system RAM
+- **Recommended:** 6GB+ VRAM and 16GB+ RAM
 
 ---
 
-## Changes from Upstream
-
-Below is a summary of all changes compared to the original Fooocus:
+## Changes from Upstream (Summary)
 
 | Feature | Description |
 |---------|-------------|
-| Configuration Tab | New tab for managing all settings with per-setting reset buttons |
-| Model Folders | Add/remove model folders dynamically without restart |
-| Auto-save Settings | All configuration changes saved automatically |
-| UI Layout | Prompts moved to left panel, negative prompt repositioned |
-| Generation History | Navigate through previous generations with << / >> buttons |
-| Random LoRA | Option to use a random LoRA from your collection |
-| Logging | Enhanced console output and progress indicators |
-| Bug Fixes | Various Gradio error fixes and improved error handling |
+| Image Library | In-app generated image browser with metadata, tag filter/search, multiselect, bulk delete, and tag editing |
+| Configuration Tab | UI-based settings management with auto-save and reset controls |
+| Dynamic Model Folders | Add/remove checkpoint and LoRA folders without restart |
+| Prompt Utilities | Wildcard placeholders and dynamic prompt groups |
+| Random LoRA | Optional random LoRA selection for experiments |
+| UX/Logging | Improved feedback and operational visibility |
 
 ---
 
 ## Original Fooocus Features
 
-FooocusPocus includes all features from the original Fooocus:
+FooocusPocus includes upstream Fooocus capabilities, including:
 
 - High-quality text-to-image generation
-- GPT-2 based prompt processing
 - Inpainting and outpainting
-- Image prompt support
-- Multiple style presets
-- Upscale and variation options
-- FaceSwap support
-- And much more...
+- Image prompt workflows
+- Style systems and model switching
+- Upscale and variation workflows
 
-**For complete documentation of all features, visit the [original Fooocus repository](https://github.com/lllyasviel/Fooocus).**
+For full documentation, see [Fooocus upstream](https://github.com/lllyasviel/Fooocus).
 
 ---
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit pull requests or open issues.
+Contributions are welcome via pull requests and issues.
 
 ## License
 
-This project inherits the same license as Fooocus. See [LICENSE](LICENSE) for details.
+This project inherits Fooocus licensing. See [LICENSE](LICENSE).
 
 ## Credits
 
@@ -139,4 +138,4 @@ This project inherits the same license as Fooocus. See [LICENSE](LICENSE) for de
 
 ---
 
-**Note:** This is an unofficial fork. For the official Fooocus project, please visit [github.com/lllyasviel/Fooocus](https://github.com/lllyasviel/Fooocus).
+**Note:** This is an unofficial fork. For the official project, visit [github.com/lllyasviel/Fooocus](https://github.com/lllyasviel/Fooocus).

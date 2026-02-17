@@ -722,3 +722,434 @@ body {
   padding: 0 2px;
   border-radius: 2px;
 }
+
+/* =============================================================================
+   Image Library Styles
+   ============================================================================= */
+
+/* Open Library Button */
+.open-library-btn {
+  margin-top: 10px;
+  margin-bottom: 10px;
+}
+
+/* Library Modal Overlay - Gradio handles display via visible prop */
+#image_library_modal {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  background: rgba(0, 0, 0, 0.85) !important;
+  z-index: 9999 !important;
+  padding: 10px !important;
+  box-sizing: border-box !important;
+}
+
+/* Flex centering when visible */
+#image_library_modal .gradio-group {
+  display: flex !important;
+  align-items: stretch !important;
+  justify-content: center !important;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* Library Modal Content */
+.library-modal-content {
+  background: var(--background-fill-primary) !important;
+  border-radius: 12px !important;
+  width: 98vw !important;
+  max-width: 98vw !important;
+  height: calc(100vh - 20px) !important;
+  max-height: calc(100vh - 20px) !important;
+  display: flex !important;
+  flex-direction: column !important;
+  padding: 15px !important;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5) !important;
+  border: 1px solid var(--border-color-primary) !important;
+  overflow: hidden !important;
+}
+
+/* Library Modal Header */
+.library-modal-header {
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  margin-bottom: 10px !important;
+  padding-bottom: 8px !important;
+  border-bottom: 1px solid var(--border-color-primary) !important;
+  flex-shrink: 0 !important;
+}
+
+.library-modal-header h2 {
+  margin: 0 !important;
+  color: var(--body-text-color) !important;
+  font-size: 1.3em !important;
+}
+
+/* Close Button */
+.library-close-btn {
+  width: 36px !important;
+  height: 36px !important;
+  min-width: 36px !important;
+  border-radius: 50% !important;
+  font-size: 22px !important;
+  line-height: 1 !important;
+  padding: 0 !important;
+  background: var(--background-fill-secondary) !important;
+  border: 1px solid var(--border-color-primary) !important;
+  cursor: pointer !important;
+}
+
+.library-close-btn:hover {
+  background: var(--color-accent) !important;
+  color: white !important;
+}
+
+/* Left panel - navigation */
+.library-left-panel {
+  display: flex !important;
+  flex-direction: column !important;
+  height: 100% !important;
+  padding-right: 10px !important;
+  border-right: 1px solid var(--border-color-primary) !important;
+  overflow: hidden !important;
+}
+
+/* Right panel - preview */
+.library-right-panel {
+  display: flex !important;
+  flex-direction: column !important;
+  height: 100% !important;
+  padding-left: 10px !important;
+  overflow-y: auto !important;
+  max-height: calc(100vh - 100px) !important;
+}
+
+/* Refresh button */
+.library-refresh-btn {
+  margin-bottom: 10px !important;
+}
+
+/* Column slider */
+#library_column_slider {
+  min-width: 100px !important;
+}
+
+/* Image Library Gallery - fill available space */
+#library_gallery {
+  flex: 1 !important;
+  min-height: 0 !important;
+  overflow-y: auto !important;
+}
+
+/* Hide gallery built-in preview when clicking */
+#library_gallery .preview {
+  display: none !important;
+}
+
+/* Library gallery thumbnails */
+#library_gallery .thumbnail-item {
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+#library_gallery .thumbnail-item:hover {
+  transform: scale(1.02);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* Preview image - fit within panel */
+#library_preview_image {
+  flex-shrink: 0 !important;
+  max-height: 50vh !important;
+  width: 100% !important;
+  object-fit: contain !important;
+}
+
+#library_preview_image img {
+  max-height: 50vh !important;
+  object-fit: contain !important;
+}
+
+/* Image metadata display - scrollable */
+#library_image_info {
+  max-height: 150px !important;
+  overflow-y: auto !important;
+  font-family: monospace;
+  font-size: 0.85em;
+  flex-shrink: 0 !important;
+}
+
+#library_image_info pre {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+/* Tags input styling */
+#image_tags {
+  margin-top: 5px;
+  margin-bottom: 5px;
+}
+
+#library_edit_tags {
+  margin-top: 10px;
+}
+
+/* Library action buttons */
+.library-action-btn {
+  margin-top: 5px;
+}
+
+/* Tag badges in metadata */
+.tag-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  margin: 2px;
+  background: var(--color-accent);
+  color: white;
+  border-radius: 12px;
+  font-size: 0.8em;
+}
+
+/* Library empty state */
+.library-empty {
+  text-align: center;
+  padding: 40px;
+  color: var(--body-text-color-subdued);
+}
+
+/* Library loading state */
+.library-loading {
+  text-align: center;
+  padding: 40px;
+  color: var(--body-text-color-subdued);
+}
+
+/* Image details panel */
+.image-details-panel {
+  background: var(--background-fill-secondary);
+  border-radius: 8px;
+  padding: 15px;
+  margin-top: 10px;
+}
+
+.image-details-panel h4 {
+  margin-top: 0;
+  margin-bottom: 10px;
+  color: var(--body-text-color);
+}
+
+/* Metadata key-value display */
+.metadata-row {
+  display: flex;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-color-primary);
+}
+
+.metadata-row:last-child {
+  border-bottom: none;
+}
+
+.metadata-key {
+  flex: 0 0 120px;
+  font-weight: 500;
+  color: var(--body-text-color);
+}
+
+.metadata-value {
+  flex: 1;
+  color: var(--body-text-color);
+  word-break: break-word;
+}
+
+/* Responsive adjustments for library */
+@media (max-width: 768px) {
+  #library_gallery {
+    min-height: 300px;
+  }
+  
+  #library_image_info {
+    max-height: 200px;
+  }
+  
+  .metadata-key {
+    flex: 0 0 80px;
+    font-size: 0.9em;
+  }
+}
+
+/* =============================================================================
+   Multiselect Mode Styles
+   ============================================================================= */
+
+/* Multiselect mode checkbox */
+#library_multiselect_mode {
+  margin-top: 10px;
+}
+
+#library_multiselect_mode label {
+  font-weight: 500;
+  cursor: pointer;
+}
+
+/* Selected count badge */
+.selected-count-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  background: var(--color-accent);
+  color: white;
+  border-radius: 16px;
+  font-size: 0.9em;
+  font-weight: 500;
+  margin-left: 10px;
+}
+
+/* Delete selected button */
+.delete-selected-btn {
+  background: #dc3545 !important;
+  color: white !important;
+  border: none !important;
+}
+
+.delete-selected-btn:hover {
+  background: #c82333 !important;
+}
+
+/* Selected image indicator in gallery */
+#library_gallery .thumbnail-item.selected {
+  outline: 3px solid var(--color-accent) !important;
+  outline-offset: 2px;
+}
+
+/* Multiselect mode gallery cursor */
+#library_gallery.multiselect-mode .thumbnail-item {
+  cursor: crosshair;
+}
+
+/* Selection overlay for thumbnails */
+#library_gallery .thumbnail-item::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: transparent;
+  pointer-events: none;
+  transition: background 0.2s ease;
+}
+
+#library_gallery .thumbnail-item.selected::after {
+  background: rgba(var(--color-accent-rgb, 52, 152, 219), 0.3);
+}
+
+/* Checkbox for all images - always visible */
+#library_gallery .thumbnail-item::before {
+  content: '';
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 20px;
+  height: 20px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 2px solid var(--border-color-primary);
+  border-radius: 4px;
+  z-index: 10;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+  transition: all 0.2s ease;
+  pointer-events: none;
+}
+
+/* Checkbox hover state */
+#library_gallery .thumbnail-item:hover::before {
+  border-color: var(--color-accent);
+  background: rgba(255, 255, 255, 1);
+}
+
+/* Checked state - show checkmark */
+#library_gallery .thumbnail-item.selected::before {
+  content: '✓';
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: bold;
+}
+
+/* Actual checkbox element (positioned on top of ::before) */
+#library_gallery .library-checkbox {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 20px;
+  height: 20px;
+  z-index: 15;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+#library_gallery .library-checkbox .checkmark {
+  display: none;
+}
+
+/* Selected images list panel */
+.selected-images-list {
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--background-fill-secondary);
+  border-radius: 8px;
+  padding: 10px;
+  margin-top: 10px;
+  border: 1px solid var(--border-color-primary);
+}
+
+.selected-images-list:empty {
+  display: none;
+}
+
+.selected-image-item {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  margin-bottom: 4px;
+  background: var(--background-fill-primary);
+  border-radius: 4px;
+  font-size: 0.85em;
+}
+
+.selected-image-item:last-child {
+  margin-bottom: 0;
+}
+
+.selected-image-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selected-image-remove {
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
+  border-radius: 50%;
+  background: var(--button-secondary-background-fill);
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  margin-left: 8px;
+  padding: 0;
+}
+
+.selected-image-remove:hover {
+  background: #dc3545;
+  color: white;
+}
