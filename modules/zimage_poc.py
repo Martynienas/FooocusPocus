@@ -187,8 +187,11 @@ def resolve_zimage_source(name: str, checkpoint_folders: list[str], auto_downloa
     if resolved is not None:
         if os.path.isdir(resolved) and is_zimage_model_directory(resolved):
             return "directory", resolved, flavor
-        if os.path.isfile(resolved) and _is_likely_zimage_safetensors(resolved):
-            return "single_file", resolved, flavor
+        if os.path.isfile(resolved):
+            # Trust explicit user selection by filename pattern even when key fingerprint
+            # is inconclusive (common with repacked/quantized AIO checkpoints).
+            if _is_likely_zimage_safetensors(resolved) or is_zimage_checkpoint_name(os.path.basename(resolved)):
+                return "single_file", resolved, flavor
 
     return None, None, flavor
 
