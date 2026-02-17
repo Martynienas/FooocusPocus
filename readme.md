@@ -93,6 +93,7 @@ After downloading, extract and run `run.bat`.
 
 - **Minimum:** 4GB Nvidia GPU VRAM and 8GB system RAM
 - **Recommended:** 6GB+ VRAM and 16GB+ RAM
+- **Runtime dependencies:** install from `requirements_versions.txt` (includes pinned `xformers` for consistent Z-Image acceleration behavior)
 
 ---
 
