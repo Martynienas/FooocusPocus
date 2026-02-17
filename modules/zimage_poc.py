@@ -1074,6 +1074,132 @@ def _choose_memory_mode(device: str, profile: str = "safe") -> tuple[str, float,
     return "full_gpu", total_vram_gb, free_vram_gb, pressure
 
 
+def _memory_mode_rank(mode: str) -> int:
+    return {"full_gpu": 0, "model_offload": 1, "sequential_offload": 2}.get(str(mode), 0)
+
+
+def _stricter_memory_mode(lhs: str, rhs: str) -> str:
+    return lhs if _memory_mode_rank(lhs) >= _memory_mode_rank(rhs) else rhs
+
+
+def _estimate_generation_vram_need_gb(
+    width: int,
+    height: int,
+    max_sequence_length: int,
+    use_cfg: bool,
+    flavor: str,
+) -> float:
+    megapixels = max(0.25, (max(64, int(width)) * max(64, int(height))) / 1_000_000.0)
+    base = 4.4 if flavor == "turbo" else 5.8
+    pixel_cost = megapixels * 2.0
+    seq_cost = max(0.0, float(max_sequence_length) / 256.0) * 1.2
+    cfg_cost = 0.4 if use_cfg else 0.0
+    return base + pixel_cost + seq_cost + cfg_cost
+
+
+def _apply_memory_mode(
+    pipeline,
+    device: str,
+    target_mode: str,
+    total_vram_gb: float,
+    free_vram_gb: float,
+    pressure: float,
+    profile: str,
+    reason: str = "",
+) -> tuple[str, bool]:
+    used_offload = False
+    current_mode = getattr(pipeline, "_zimage_memory_mode", "unset")
+    if current_mode in ("sequential_offload", "model_offload", "full_gpu"):
+        target_mode = _stricter_memory_mode(current_mode, target_mode)
+
+    reason_suffix = f", reason={reason}" if reason else ""
+    if target_mode == "sequential_offload" and hasattr(pipeline, "enable_sequential_cpu_offload"):
+        pipeline.enable_sequential_cpu_offload()
+        pipeline._zimage_memory_mode = "sequential_offload"
+        used_offload = True
+        print(
+            f"[Z-Image POC] Using sequential CPU offload "
+            f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f}, profile={profile}{reason_suffix})."
+        )
+    elif target_mode in ("model_offload", "sequential_offload") and hasattr(pipeline, "enable_model_cpu_offload"):
+        pipeline.enable_model_cpu_offload()
+        pipeline._zimage_memory_mode = "model_offload"
+        used_offload = True
+        print(
+            f"[Z-Image POC] Using model CPU offload "
+            f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f}, profile={profile}{reason_suffix})."
+        )
+    else:
+        if current_mode in ("sequential_offload", "model_offload"):
+            # Keep existing offload hooks instead of trying to force full-GPU.
+            used_offload = True
+        else:
+            pipeline.to(device)
+            pipeline._zimage_memory_mode = "full_gpu"
+        print(
+            f"[Z-Image POC] Using full-GPU mode "
+            f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f}, profile={profile}{reason_suffix})."
+        )
+
+    return ("cuda" if device == "cuda" else "cpu"), used_offload
+
+
+def _preflight_generation_memory_mode(
+    pipeline,
+    cache_key: str,
+    device: str,
+    generator_device: str,
+    used_offload: bool,
+    profile: str,
+    width: int,
+    height: int,
+    max_sequence_length: int,
+    use_cfg: bool,
+    flavor: str,
+) -> tuple[str, bool]:
+    if device != "cuda" or generator_device != "cuda":
+        return generator_device, used_offload
+
+    base_mode, total_vram_gb, free_vram_gb, pressure = _choose_memory_mode(device, profile=profile)
+    target_mode = base_mode
+    estimated_need_gb = _estimate_generation_vram_need_gb(
+        width=width,
+        height=height,
+        max_sequence_length=max_sequence_length,
+        use_cfg=use_cfg,
+        flavor=flavor,
+    )
+    headroom_gb = {"safe": 1.75, "balanced": 1.35, "speed": 0.95}.get(profile, 1.35)
+    gap_gb = free_vram_gb - estimated_need_gb
+
+    if gap_gb < max(0.35, headroom_gb * 0.50):
+        target_mode = "sequential_offload"
+    elif gap_gb < headroom_gb:
+        target_mode = _stricter_memory_mode(target_mode, "model_offload")
+
+    current_mode = getattr(pipeline, "_zimage_memory_mode", "unset")
+    if _memory_mode_rank(target_mode) > _memory_mode_rank(current_mode):
+        reason = f"preflight est={estimated_need_gb:.2f}GB gap={gap_gb:.2f}GB"
+        generator_device, used_offload = _apply_memory_mode(
+            pipeline=pipeline,
+            device=device,
+            target_mode=target_mode,
+            total_vram_gb=total_vram_gb,
+            free_vram_gb=free_vram_gb,
+            pressure=pressure,
+            profile=profile,
+            reason=reason,
+        )
+        _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
+
+    print(
+        f"[Z-Image POC] Preflight VRAM budget: est={estimated_need_gb:.2f}GB, "
+        f"free={free_vram_gb:.2f}GB, gap={gap_gb:.2f}GB, base={base_mode}, "
+        f"active={getattr(pipeline, '_zimage_memory_mode', 'unset')}."
+    )
+    return generator_device, used_offload
+
+
 def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
     """
     Returns (generator_device, used_offload_mode).
@@ -1114,43 +1240,16 @@ def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
                 except Exception:
                     pass
 
-        current_mode = getattr(pipeline, "_zimage_memory_mode", "unset")
         target_mode, total_vram_gb, free_vram_gb, pressure = _choose_memory_mode(device, profile=profile)
-
-        # Do not relax memory mode for a cached pipeline:
-        # keep the strictest mode already proven stable.
-        if current_mode == "sequential_offload":
-            target_mode = "sequential_offload"
-        elif current_mode == "model_offload" and target_mode == "full_gpu":
-            target_mode = "model_offload"
-
-        if target_mode == "sequential_offload" and hasattr(pipeline, "enable_sequential_cpu_offload"):
-            pipeline.enable_sequential_cpu_offload()
-            pipeline._zimage_memory_mode = "sequential_offload"
-            used_offload = True
-            print(
-                f"[Z-Image POC] Using sequential CPU offload "
-                f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f}, profile={profile})."
-            )
-        elif target_mode in ("model_offload", "sequential_offload") and hasattr(pipeline, "enable_model_cpu_offload"):
-            pipeline.enable_model_cpu_offload()
-            pipeline._zimage_memory_mode = "model_offload"
-            used_offload = True
-            print(
-                f"[Z-Image POC] Using model CPU offload "
-                f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f}, profile={profile})."
-            )
-        else:
-            if current_mode in ("sequential_offload", "model_offload"):
-                # Keep existing offload hooks instead of trying to force full-GPU.
-                used_offload = True
-            else:
-                pipeline.to(device)
-                pipeline._zimage_memory_mode = "full_gpu"
-            print(
-                f"[Z-Image POC] Using full-GPU mode "
-                f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f}, profile={profile})."
-            )
+        _, used_offload = _apply_memory_mode(
+            pipeline=pipeline,
+            device=device,
+            target_mode=target_mode,
+            total_vram_gb=total_vram_gb,
+            free_vram_gb=free_vram_gb,
+            pressure=pressure,
+            profile=profile,
+        )
     else:
         pipeline.to(device)
 
@@ -1383,7 +1482,6 @@ def generate_zimage(
     if generator_device == "cuda":
         if profile != "speed":
             _cleanup_memory(cuda=True, aggressive=False)
-    generator = torch.Generator(device=generator_device).manual_seed(seed)
 
     # Align scheduler shift with Forge-style "Shift" control when available.
     try:
@@ -1437,6 +1535,21 @@ def generate_zimage(
                 f"[Z-Image POC] Very low free VRAM before generation ({free_gb:.2f}GB/{total_gb:.2f}GB), "
                 "using max_sequence_length=160."
             )
+
+    generator_device, used_offload = _preflight_generation_memory_mode(
+        pipeline=pipeline,
+        cache_key=cache_key,
+        device="cuda" if generator_device == "cuda" else "cpu",
+        generator_device=generator_device,
+        used_offload=used_offload,
+        profile=profile,
+        width=width,
+        height=height,
+        max_sequence_length=max_sequence_length,
+        use_cfg=use_cfg,
+        flavor=flavor,
+    )
+    generator = torch.Generator(device=generator_device).manual_seed(seed)
 
     neg_key = negative_prompt if use_cfg else ""
     embed_cache_key = (
