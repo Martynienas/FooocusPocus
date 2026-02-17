@@ -53,6 +53,7 @@ def _recommended_xformers_for_torch() -> str | None:
         "2.5.0": "xformers==0.0.28.post2",
         "2.5.1": "xformers==0.0.29.post1",
         "2.6.0": "xformers==0.0.29.post2",
+        "2.9.0": "xformers==0.0.33.post1",
     }
     return mapping.get(torch_version, None)
 
@@ -64,9 +65,9 @@ def _version_from_pin(spec: str) -> str | None:
 
 
 def prepare_environment():
-    torch_index_url = os.environ.get('TORCH_INDEX_URL', "https://download.pytorch.org/whl/cu124")
+    torch_index_url = os.environ.get('TORCH_INDEX_URL', "https://download.pytorch.org/whl/cu126")
     torch_command = os.environ.get('TORCH_COMMAND',
-                                   f"pip install torch==2.6.0 torchvision==0.21.0 --extra-index-url {torch_index_url}")
+                                   f"pip install torch==2.9.0 torchvision==0.24.0 --extra-index-url {torch_index_url}")
     requirements_file = os.environ.get('REQS_FILE', "requirements_versions.txt")
 
     print(f"Python {sys.version}")
@@ -76,10 +77,10 @@ def prepare_environment():
         REINSTALL_ALL
         or not is_installed("torch")
         or not is_installed("torchvision")
-        or not torch_stack_is_compatible("2.6.0")
+        or not torch_stack_is_compatible("2.9.0")
     )
     if need_torch_stack_install:
-        print("Installing/upgrading torch stack (requires torch>=2.6 for current transformers security policy).")
+        print("Installing/upgrading torch stack (requires torch>=2.9 for this safe branch xformers profile).")
         run(f'"{python}" -m {torch_command}', "Installing torch and torchvision", "Couldn't install torch", live=True)
 
     if TRY_INSTALL_XFORMERS:
