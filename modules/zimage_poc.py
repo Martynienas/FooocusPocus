@@ -892,10 +892,10 @@ def _choose_memory_mode(device: str) -> tuple[str, float, float, float]:
     pressure = (free_vram_gb / total_vram_gb) if total_vram_gb > 0 else 0.0
 
     # Keep this general for consumer GPUs:
-    # - <=10GB: sequential offload (8GB cards)
-    # - <=16GB: model offload (12GB/16GB cards)
+    # - <=12GB: sequential offload (8GB/10GB/12GB cards)
+    # - <=16GB: model offload (16GB cards)
     # - >16GB: dynamic by free-memory pressure
-    if total_vram_gb > 0 and total_vram_gb <= 10.0:
+    if total_vram_gb > 0 and total_vram_gb <= 12.0:
         return "sequential_offload", total_vram_gb, free_vram_gb, pressure
     if total_vram_gb > 0 and total_vram_gb <= 16.0:
         return "model_offload", total_vram_gb, free_vram_gb, pressure
@@ -931,9 +931,12 @@ def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
         current_mode = getattr(pipeline, "_zimage_memory_mode", "unset")
         target_mode, total_vram_gb, free_vram_gb, pressure = _choose_memory_mode(device)
 
-        # Do not downgrade from offload modes to full-gpu once hooks are installed.
-        if current_mode in ("sequential_offload", "model_offload") and target_mode == "full_gpu":
-            target_mode = current_mode
+        # Do not relax memory mode for a cached pipeline:
+        # keep the strictest mode already proven stable.
+        if current_mode == "sequential_offload":
+            target_mode = "sequential_offload"
+        elif current_mode == "model_offload" and target_mode == "full_gpu":
+            target_mode = "model_offload"
 
         if target_mode == "sequential_offload" and hasattr(pipeline, "enable_sequential_cpu_offload"):
             pipeline.enable_sequential_cpu_offload()
@@ -1335,6 +1338,9 @@ def generate_zimage(
         raise
     finally:
         try:
+            # Ensure accelerate offload hooks release device-resident weights between images.
+            if hasattr(pipeline, "maybe_free_model_hooks"):
+                pipeline.maybe_free_model_hooks()
             del prompt_embeds
             del negative_prompt_embeds
             del generator
