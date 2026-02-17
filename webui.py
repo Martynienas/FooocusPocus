@@ -1714,12 +1714,83 @@ with shared.gradio_root:
         # =========================================================================
         # Image Library Event Handlers
         # =========================================================================
+
+        def get_image_library():
+            """Get shared image library instance."""
+            from modules.image_library import get_library
+            return get_library()
+
+        def build_gallery_items(images):
+            """
+            Convert image info list to gallery items.
+            Keep relative path as caption so we can resolve real file paths on selection.
+            """
+            return [[img['path'], img.get('rel_path', img.get('filename', ''))] for img in images]
+
+        def extract_gallery_selection(selected) -> tuple[str, str]:
+            """Extract raw image path and caption from Gradio gallery value."""
+            if isinstance(selected, dict):
+                image_path = selected.get('image', selected.get('name', ''))
+                caption = selected.get('caption', '')
+            elif isinstance(selected, (list, tuple)):
+                image_path = selected[0] if len(selected) > 0 else ''
+                caption = selected[1] if len(selected) > 1 else ''
+            else:
+                image_path = str(selected)
+                caption = ''
+
+            while isinstance(image_path, dict):
+                image_path = image_path.get('path', image_path.get('name', image_path.get('image', '')))
+            while isinstance(caption, dict):
+                caption = caption.get('caption', caption.get('name', ''))
+
+            if not isinstance(image_path, str):
+                image_path = str(image_path) if image_path else ''
+            if not isinstance(caption, str):
+                caption = str(caption) if caption else ''
+
+            return image_path, caption
+
+        def resolve_library_image_path(raw_path: str, caption: str = '') -> str:
+            """
+            Resolve gallery-selected path to canonical file path under the configured output folder.
+            This avoids deleting transient display-cache files.
+            """
+            lib = get_image_library()
+            output_folder = lib.get_output_folder()
+
+            candidates = []
+            if caption:
+                if os.path.isabs(caption):
+                    candidates.append(caption)
+                elif output_folder:
+                    candidates.append(os.path.join(output_folder, caption))
+
+            if raw_path:
+                candidates.append(raw_path)
+                if output_folder and not os.path.isabs(raw_path):
+                    candidates.append(os.path.join(output_folder, raw_path))
+
+            for candidate in candidates:
+                try:
+                    resolved = os.path.realpath(os.path.expanduser(candidate))
+                except Exception:
+                    continue
+                if os.path.isfile(resolved):
+                    return resolved
+
+            filename = os.path.basename(raw_path) or os.path.basename(caption)
+            if filename:
+                matches = [img['path'] for img in lib.scan_images(force_refresh=True) if img.get('filename') == filename]
+                if len(matches) == 1:
+                    return matches[0]
+
+            return raw_path
         
         def library_refresh_images(search_text=None, filter_tags=None):
             """Refresh the image library gallery."""
-            from modules.image_library import ImageLibrary
-            lib = ImageLibrary()
-            images = lib.scan_images()
+            lib = get_image_library()
+            images = lib.scan_images(force_refresh=True)
             
             # Filter by search text
             if search_text:
@@ -1733,33 +1804,18 @@ with shared.gradio_root:
             all_tags = list(lib.get_all_tags().keys())
             
             # Return gallery images and tag choices
-            # Gallery format: list of [path, label] where label is shown on hover
-            gallery_images = [[img['path'], img.get('filename', '')] for img in images]
+            gallery_images = build_gallery_items(images)
             return gr.update(value=gallery_images), gr.update(choices=all_tags)
         
         def library_on_image_select(evt: gr.SelectData, gallery_value):
             """Handle image selection in gallery."""
             if gallery_value and evt.index < len(gallery_value):
                 selected = gallery_value[evt.index]
-                # Handle different Gradio Gallery data formats
-                # Newer Gradio: dict with 'image' and 'caption' keys
-                # Older Gradio: tuple/list with (image, caption) or just image path
-                if isinstance(selected, dict):
-                    image_path = selected.get('image', selected.get('name', ''))
-                elif isinstance(selected, (list, tuple)):
-                    image_path = selected[0]
-                else:
-                    image_path = str(selected)
-                
-                # Handle nested dict in image_path
-                while isinstance(image_path, dict):
-                    image_path = image_path.get('path', image_path.get('name', image_path.get('image', '')))
-                if not isinstance(image_path, str):
-                    image_path = str(image_path) if image_path else ''
-                
-                from modules.image_library import ImageLibrary
-                lib = ImageLibrary()
-                info = lib.get_image_info(image_path)
+                raw_path, caption = extract_gallery_selection(selected)
+                resolved_path = resolve_library_image_path(raw_path, caption)
+
+                lib = get_image_library()
+                info = lib.get_image_info(resolved_path)
                 
                 if info is None:
                     return gr.update(), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), None
@@ -1775,13 +1831,13 @@ with shared.gradio_root:
                 metadata = info.get('metadata', {})
                 
                 return (
-                    gr.update(value=image_path),
+                    gr.update(value=info['path']),
                     metadata,
                     gr.update(visible=True),
                     gr.update(visible=True),
                     gr.update(visible=True, value=current_tags),
                     gr.update(visible=True),
-                    image_path
+                    info['path']
                 )
             return gr.update(), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), None
         
@@ -1806,8 +1862,7 @@ with shared.gradio_root:
             if not image_path:
                 return gr.update()
             
-            from modules.image_library import ImageLibrary
-            lib = ImageLibrary()
+            lib = get_image_library()
             
             # Convert comma-separated tags to list
             if isinstance(new_tags, str):
@@ -1831,35 +1886,33 @@ with shared.gradio_root:
                 print("[Library] No image path provided")
                 return gr.update(), gr.update(), None
             
-            from modules.image_library import ImageLibrary
-            lib = ImageLibrary()
+            lib = get_image_library()
+            resolved_path = resolve_library_image_path(image_path)
             
-            print(f"[Library] Attempting to delete: {image_path}")
-            success = lib.delete_image(image_path)
+            print(f"[Library] Attempting to delete: {resolved_path}")
+            success = lib.delete_image(resolved_path)
             print(f"[Library] Delete result: {success}")
             
             if success:
                 # Refresh gallery
                 lib.clear_cache()
-                images = lib.scan_images()
-                gallery_images = [[img['path'], img.get('filename', '')] for img in images]
+                images = lib.scan_images(force_refresh=True)
+                gallery_images = build_gallery_items(images)
                 print(f"[Library] Gallery refreshed with {len(gallery_images)} images")
                 return (
                     gr.update(value=gallery_images),
                     gr.update(value=None),
                     None
                 )
-            print(f"[Library] Delete failed for: {image_path}")
+            print(f"[Library] Delete failed for: {resolved_path}")
             return gr.update(), gr.update(), image_path
         
         # Modal open/close handlers
         def open_library_modal(auto_load):
             if auto_load:
-                from modules.image_library import ImageLibrary
-                lib = ImageLibrary()
-                images = lib.scan_images()
-                # Convert to gallery format: list of [path, caption] or dict format
-                gallery_images = [[img['path'], img.get('filename', '')] for img in images]
+                lib = get_image_library()
+                images = lib.scan_images(force_refresh=True)
+                gallery_images = build_gallery_items(images)
                 tags = lib.get_all_tags()
                 return gr.update(visible=True), gr.update(value=gallery_images), gr.update(choices=list(tags.keys()))
             return gr.update(visible=True), gr.update(), gr.update()
