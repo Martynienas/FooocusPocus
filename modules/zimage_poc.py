@@ -240,6 +240,17 @@ def _download_repo_components(repo_id: str, local_config: str, patterns: list[st
     )
 
 
+def _has_local_transformer_weights(local_config: str) -> bool:
+    transformer_dir = os.path.join(local_config, "transformer")
+    if not os.path.isdir(transformer_dir):
+        return False
+    for name in os.listdir(transformer_dir):
+        lowered = name.lower()
+        if lowered.startswith("diffusion_pytorch_model"):
+            return True
+    return False
+
+
 def _ensure_single_file_component_dir(
     flavor: str,
     checkpoint_folders: list[str],
@@ -410,14 +421,22 @@ def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) 
                 print(f"[Z-Image POC] Skipped VAE weights from single-file: {e}")
 
 
-def _apply_component_state_dict(component, state_dict: dict, label: str, missing_limit: int = 999999, unexpected_limit: int = 999999):
+def _apply_component_state_dict(
+    component,
+    state_dict: dict,
+    label: str,
+    missing_limit: Optional[int] = None,
+    unexpected_limit: Optional[int] = None,
+):
     if component is None or not state_dict:
         return
     missing, unexpected = component.load_state_dict(state_dict, strict=False)
-    if len(unexpected) > unexpected_limit:
+    if unexpected_limit is not None and len(unexpected) > unexpected_limit:
         raise RuntimeError(f"{label} weight mismatch too large (unexpected={len(unexpected)}).")
-    if len(missing) > missing_limit:
+    if missing_limit is not None and len(missing) > missing_limit:
         raise RuntimeError(f"{label} weight mismatch too large (missing={len(missing)}).")
+    if len(unexpected) > 0 or len(missing) > 0:
+        print(f"[Z-Image POC] {label} non-strict load: missing={len(missing)}, unexpected={len(unexpected)}")
     print(f"[Z-Image POC] Loaded {label} from single-file ({len(state_dict)} tensors).")
 
 
@@ -478,8 +497,8 @@ def _build_pipeline_from_single_file_components(local_config: str, single_file_p
         getattr(pipeline, "transformer", None),
         parts["transformer"],
         label="transformer",
-        missing_limit=256,
-        unexpected_limit=64,
+        missing_limit=None,
+        unexpected_limit=None,
     )
     _apply_component_state_dict(getattr(pipeline, "text_encoder", None), parts["text_encoder"], label="text_encoder")
     _apply_component_state_dict(getattr(pipeline, "vae", None), parts["vae"], label="vae")
@@ -579,9 +598,19 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
             flavor, checkpoint_folders, source_path
         )
 
-        # Prefer native single-file loader first for lower CPU RAM peak.
+        # Prefer split-loader first to avoid native path loading full local transformer
+        # weights (which may not exist and can cause long delays).
+        split_error = None
+        try:
+            pipeline = _build_pipeline_from_single_file_components(local_config, source_path, dtype)
+        except Exception as e:
+            split_error = e
+            print(f"[Z-Image POC] Split-loader fallback due to: {e}")
+
+        # If split-loader fails, use native single-file only when local transformer
+        # weights are actually available.
         native_error = None
-        if hasattr(DiffusionPipeline, "from_single_file"):
+        if split_error is not None and hasattr(DiffusionPipeline, "from_single_file") and _has_local_transformer_weights(local_config):
             try:
                 single_file_kwargs = dict(
                     config=local_config,
@@ -600,13 +629,26 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
                 native_error = e
                 print(f"[Z-Image POC] Native single-file loader fallback due to: {e}")
 
-        if native_error is not None or not hasattr(DiffusionPipeline, "from_single_file"):
-            # Forge-like fallback: build from local component configs and load
-            # single-file weights into transformer/text_encoder/vae.
+        if split_error is not None and (native_error is not None or not hasattr(DiffusionPipeline, "from_single_file")):
+            # Legacy fallback path.
             try:
-                pipeline = _build_pipeline_from_single_file_components(local_config, source_path, dtype)
-            except Exception as split_build_error:
-                print(f"[Z-Image POC] Split-loader fallback due to: {split_build_error}")
+                pipeline = DiffusionPipeline.from_pretrained(
+                    local_config,
+                    torch_dtype=dtype,
+                    trust_remote_code=True,
+                    local_files_only=True,
+                )
+            except Exception:
+                if not tried_config_only_text_encoder:
+                    raise split_error
+                # Fallback: some backends require full text_encoder files even when AIO contains weights.
+                repo_id = _repo_for_flavor(flavor)
+                _download_repo_components(
+                    repo_id,
+                    local_config,
+                    patterns=["text_encoder/*"],
+                    missing=["text_encoder(fallback-full)"],
+                )
                 try:
                     pipeline = DiffusionPipeline.from_pretrained(
                         local_config,
@@ -615,23 +657,14 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
                         local_files_only=True,
                     )
                 except Exception:
-                    if not tried_config_only_text_encoder:
-                        raise
-                    # Fallback: some backends require full text_encoder files even when AIO contains weights.
-                    repo_id = _repo_for_flavor(flavor)
-                    _download_repo_components(
-                        repo_id,
-                        local_config,
-                        patterns=["text_encoder/*"],
-                        missing=["text_encoder(fallback-full)"],
-                    )
-                    pipeline = DiffusionPipeline.from_pretrained(
-                        local_config,
-                        torch_dtype=dtype,
-                        trust_remote_code=True,
-                        local_files_only=True,
-                    )
-                _load_transformer_weights_from_single_file(source_path, pipeline)
+                    raise split_error
+            _load_transformer_weights_from_single_file(source_path, pipeline)
+
+        if split_error is not None and native_error is None and hasattr(DiffusionPipeline, "from_single_file") and _has_local_transformer_weights(local_config):
+            # Native path succeeded and set pipeline.
+            pass
+        elif split_error is not None and native_error is None and (not hasattr(DiffusionPipeline, "from_single_file") or not _has_local_transformer_weights(local_config)):
+            raise split_error
     else:
         raise ValueError(f"Unsupported source kind: {source_kind}")
 
