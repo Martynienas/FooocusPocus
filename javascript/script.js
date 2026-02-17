@@ -327,9 +327,14 @@ function setupGalleryHandlers() {
                 const triggerBtn = document.getElementById('library_checkbox_trigger');
                 
                 if (pathInput && selectedInput && triggerBtn) {
-                    // Get the image path from the thumbnail
-                    const img = thumb.querySelector('img');
-                    const imagePath = img ? img.src : libraryImagePaths[index];
+                    // Get the image path - use the stored path which includes caption info
+                    const imagePath = libraryImagePaths[index] || '';
+                    
+                    console.log('[Library] Checkbox clicked:', {
+                        index: index,
+                        imagePath: imagePath,
+                        isSelected: thumb.classList.contains('selected')
+                    });
                     
                     // Update hidden inputs
                     pathInput.value = imagePath;
@@ -353,14 +358,50 @@ function setupGalleryHandlers() {
 
 function updateImagePaths(gallery) {
     // Extract paths from gallery items
+    // The gallery stores [path, caption] pairs where caption is the relative path
     libraryImagePaths = [];
-    const items = gallery.querySelectorAll('.thumbnail-item img');
-    items.forEach(function(img, index) {
-        // Get the src and extract the path
-        const src = img.src;
-        // The path is usually in the src as a file path or data attribute
-        // We'll store the src for now and let Python resolve it
-        libraryImagePaths[index] = src;
+    
+    // Get all thumbnail items
+    const items = gallery.querySelectorAll('.thumbnail-item');
+    items.forEach(function(item, index) {
+        // Get the img element
+        const img = item.querySelector('img');
+        if (img) {
+            // The src is a Gradio file URL like /file=/path/to/image.png
+            let src = img.src || '';
+            
+            // Extract path from Gradio file URL
+            // Format: /file=/actual/path or /file=path
+            let filePath = src;
+            if (src.includes('/file=')) {
+                filePath = src.split('/file=')[1] || '';
+                // Decode the URL
+                try {
+                    filePath = decodeURIComponent(filePath);
+                } catch (e) {
+                    // Keep original if decode fails
+                }
+            }
+            
+            // Look for the caption in the thumbnail's text content
+            // Gradio gallery captions are often in a separate element
+            const captionEl = item.querySelector('.caption, .gallery-item-caption, [class*="caption"]');
+            let caption = captionEl ? captionEl.textContent : '';
+            
+            // Also check for alt text or title
+            if (!caption) {
+                caption = img.alt || img.title || '';
+            }
+            
+            // Store as object with both path and caption for Python to resolve
+            const pathData = JSON.stringify({
+                path: filePath,
+                caption: caption
+            });
+            libraryImagePaths[index] = pathData;
+            
+            console.log('[Library] Image path ' + index + ':', pathData);
+        }
     });
 }
 

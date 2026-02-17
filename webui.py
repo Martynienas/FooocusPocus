@@ -1923,11 +1923,26 @@ with shared.gradio_root:
         
         def library_multiselect_checkbox(is_selected, image_path, selected_paths):
             """Handle checkbox click for multi-select."""
+            print(f"[Library] Checkbox click: is_selected={is_selected}, image_path={image_path}, current_selected={selected_paths}")
+            
             if not image_path:
                 return selected_paths, gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
             
+            # Parse the JSON data from JavaScript
+            try:
+                import json
+                path_data = json.loads(image_path) if image_path.startswith('{') else {'path': image_path, 'caption': ''}
+                raw_path = path_data.get('path', image_path)
+                caption = path_data.get('caption', '')
+            except (json.JSONDecodeError, TypeError):
+                raw_path = image_path
+                caption = ''
+            
+            print(f"[Library] Parsed: raw_path={raw_path}, caption={caption}")
+            
             # Resolve the path
-            resolved_path = resolve_library_image_path(image_path)
+            resolved_path = resolve_library_image_path(raw_path, caption)
+            print(f"[Library] Resolved path: {resolved_path}")
             
             if is_selected:
                 # Add to selection
@@ -1936,6 +1951,8 @@ with shared.gradio_root:
             else:
                 # Remove from selection
                 selected_paths = [p for p in selected_paths if p != resolved_path]
+            
+            print(f"[Library] Updated selected_paths: {selected_paths}")
             
             # Update UI
             count = len(selected_paths)
