@@ -261,17 +261,6 @@ def _download_repo_components(repo_id: str, local_config: str, patterns: list[st
     )
 
 
-def _has_local_transformer_weights(local_config: str) -> bool:
-    transformer_dir = os.path.join(local_config, "transformer")
-    if not os.path.isdir(transformer_dir):
-        return False
-    for name in os.listdir(transformer_dir):
-        lowered = name.lower()
-        if lowered.startswith("diffusion_pytorch_model"):
-            return True
-    return False
-
-
 def _ensure_single_file_component_dir(
     flavor: str,
     checkpoint_folders: list[str],
@@ -511,7 +500,7 @@ def _remap_state_dict_to_model_keys(state_dict: dict, model_keys: set[str], labe
 def _build_pipeline_from_single_file_components(
     local_config: str,
     single_file_path: str,
-    torch_dtype,
+    dtype,
     prefer_single_file_aux_weights: bool = False,
 ):
     from diffusers import DiffusionPipeline
@@ -556,12 +545,12 @@ def _build_pipeline_from_single_file_components(
             if hasattr(cls, "load_config") and hasattr(cls, "from_config"):
                 model = cls.from_config(cls.load_config(comp_path))
             else:
-                model = cls.from_pretrained(comp_path, local_files_only=True, torch_dtype=torch_dtype)
+                model = cls.from_pretrained(comp_path, local_files_only=True, dtype=dtype)
         else:
-            model = cls.from_pretrained(comp_path, local_files_only=True, torch_dtype=torch_dtype)
+            model = cls.from_pretrained(comp_path, local_files_only=True, dtype=dtype)
 
         if hasattr(model, "to"):
-            model = model.to(dtype=torch_dtype)
+            model = model.to(dtype=dtype)
         components[component_name] = model
 
     pipeline = pipeline_cls(**components)
@@ -629,6 +618,39 @@ def _cuda_total_vram_gb() -> float:
         return 0.0
 
 
+def _choose_memory_mode(device: str) -> tuple[str, float, float, float]:
+    import torch
+
+    if device != "cuda":
+        return "full_gpu", 0.0, 0.0, 0.0
+
+    total_vram_gb = _cuda_total_vram_gb()
+    free_vram_gb = 0.0
+    try:
+        free_bytes, total_bytes = torch.cuda.mem_get_info(torch.cuda.current_device())
+        free_vram_gb = float(free_bytes) / float(1024**3)
+        if total_vram_gb <= 0:
+            total_vram_gb = float(total_bytes) / float(1024**3)
+    except Exception:
+        pass
+
+    pressure = (free_vram_gb / total_vram_gb) if total_vram_gb > 0 else 0.0
+
+    # Keep this general for consumer GPUs:
+    # - <=10GB: sequential offload (8GB cards)
+    # - <=16GB: model offload (12GB/16GB cards)
+    # - >16GB: dynamic by free-memory pressure
+    if total_vram_gb > 0 and total_vram_gb <= 10.0:
+        return "sequential_offload", total_vram_gb, free_vram_gb, pressure
+    if total_vram_gb > 0 and total_vram_gb <= 16.0:
+        return "model_offload", total_vram_gb, free_vram_gb, pressure
+    if pressure < 0.15:
+        return "sequential_offload", total_vram_gb, free_vram_gb, pressure
+    if pressure < 0.35:
+        return "model_offload", total_vram_gb, free_vram_gb, pressure
+    return "full_gpu", total_vram_gb, free_vram_gb, pressure
+
+
 def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
     """
     Returns (generator_device, used_offload_mode).
@@ -651,35 +673,36 @@ def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
         if hasattr(pipeline, "enable_vae_tiling"):
             pipeline.enable_vae_tiling()
 
-        total_vram_gb = _cuda_total_vram_gb()
-        free_vram_gb = 0.0
-        try:
-            free_bytes, total_bytes = torch.cuda.mem_get_info(torch.cuda.current_device())
-            free_vram_gb = float(free_bytes) / float(1024**3)
-            if total_vram_gb <= 0:
-                total_vram_gb = float(total_bytes) / float(1024**3)
-        except Exception:
-            pass
+        current_mode = getattr(pipeline, "_zimage_memory_mode", "unset")
+        target_mode, total_vram_gb, free_vram_gb, pressure = _choose_memory_mode(device)
 
-        pressure = (free_vram_gb / total_vram_gb) if total_vram_gb > 0 else 0.0
+        # Do not downgrade from offload modes to full-gpu once hooks are installed.
+        if current_mode in ("sequential_offload", "model_offload") and target_mode == "full_gpu":
+            target_mode = current_mode
 
-        # Decide by real-time pressure first; avoid forcing offload on otherwise free GPUs.
-        if hasattr(pipeline, "enable_sequential_cpu_offload") and pressure < 0.15:
+        if target_mode == "sequential_offload" and hasattr(pipeline, "enable_sequential_cpu_offload"):
             pipeline.enable_sequential_cpu_offload()
+            pipeline._zimage_memory_mode = "sequential_offload"
             used_offload = True
             print(
                 f"[Z-Image POC] Using sequential CPU offload "
                 f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f})."
             )
-        elif hasattr(pipeline, "enable_model_cpu_offload") and pressure < 0.35:
+        elif target_mode in ("model_offload", "sequential_offload") and hasattr(pipeline, "enable_model_cpu_offload"):
             pipeline.enable_model_cpu_offload()
+            pipeline._zimage_memory_mode = "model_offload"
             used_offload = True
             print(
                 f"[Z-Image POC] Using model CPU offload "
                 f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f})."
             )
         else:
-            pipeline.to(device)
+            if current_mode in ("sequential_offload", "model_offload"):
+                # Keep existing offload hooks instead of trying to force full-GPU.
+                used_offload = True
+            else:
+                pipeline.to(device)
+                pipeline._zimage_memory_mode = "full_gpu"
             print(
                 f"[Z-Image POC] Using full-GPU mode "
                 f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f})."
@@ -729,6 +752,10 @@ def _ensure_zimage_runtime_compatibility() -> None:
 def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_folders: list[str]):
     cache_key = f"{source_kind}:{os.path.abspath(source_path)}"
     if cache_key in _PIPELINE_CACHE:
+        pipeline, _, _ = _PIPELINE_CACHE[cache_key]
+        device, _ = _pick_device_and_dtype()
+        generator_device, used_offload = _prepare_pipeline_memory_mode(pipeline, device)
+        _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
         return _PIPELINE_CACHE[cache_key]
 
     from diffusers import DiffusionPipeline
@@ -747,7 +774,6 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
         pipeline = DiffusionPipeline.from_pretrained(
             source_path,
             dtype=dtype,
-            trust_remote_code=True,
             local_files_only=True,
         )
     elif source_kind == "single_file":
@@ -755,61 +781,46 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
             flavor, checkpoint_folders, source_path
         )
 
-        # Prefer split-loader first to avoid native path loading full local transformer
-        # weights (which may not exist and can cause long delays).
         split_error = None
+        native_error = None
+        pipeline = None
+
+        # Forge-like priority: let the framework load the single-file checkpoint natively first.
         try:
-            prefer_native_fp8 = _is_likely_fp8_single_file(source_path)
-            if prefer_native_fp8 and hasattr(DiffusionPipeline, "from_single_file"):
+            if hasattr(DiffusionPipeline, "from_single_file"):
                 native_kwargs = dict(
                     config=local_config,
-                    trust_remote_code=True,
                     local_files_only=True,
                     low_cpu_mem_usage=True,
                 )
-                # For fp8 keep default dtype behavior to avoid accidental upcast.
-                print("[Z-Image POC] FP8 checkpoint detected, preferring native single-file loader.")
+                if not _is_likely_fp8_single_file(source_path):
+                    native_kwargs["dtype"] = dtype
+                else:
+                    print("[Z-Image POC] FP8 checkpoint detected, preferring native single-file loader.")
                 pipeline = DiffusionPipeline.from_single_file(source_path, **native_kwargs)
-            else:
+        except Exception as e:
+            native_error = e
+            print(f"[Z-Image POC] Native single-file loader fallback due to: {e}")
+
+        # Fallback: split-loader assembly.
+        if pipeline is None:
+            try:
                 pipeline = _build_pipeline_from_single_file_components(
                     local_config,
                     source_path,
                     dtype,
                     prefer_single_file_aux_weights=prefer_single_file_aux_weights,
                 )
-        except Exception as e:
-            split_error = e
-            print(f"[Z-Image POC] Split-loader fallback due to: {e}")
-
-        # If split-loader fails, use native single-file only when local transformer
-        # weights are actually available.
-        native_error = None
-        if split_error is not None and hasattr(DiffusionPipeline, "from_single_file") and _has_local_transformer_weights(local_config):
-            try:
-                single_file_kwargs = dict(
-                    config=local_config,
-                    trust_remote_code=True,
-                    local_files_only=True,
-                    low_cpu_mem_usage=True,
-                )
-                # Avoid forced upcast for fp8 checkpoints.
-                if "fp8" not in os.path.basename(source_path).lower():
-                    single_file_kwargs["dtype"] = dtype
-                pipeline = DiffusionPipeline.from_single_file(
-                    source_path,
-                    **single_file_kwargs,
-                )
             except Exception as e:
-                native_error = e
-                print(f"[Z-Image POC] Native single-file loader fallback due to: {e}")
+                split_error = e
+                print(f"[Z-Image POC] Split-loader fallback due to: {e}")
 
-        if split_error is not None and (native_error is not None or not hasattr(DiffusionPipeline, "from_single_file")):
+        if pipeline is None and split_error is not None:
             # Legacy fallback path.
             try:
                 pipeline = DiffusionPipeline.from_pretrained(
                     local_config,
                     dtype=dtype,
-                    trust_remote_code=True,
                     local_files_only=True,
                 )
             except Exception:
@@ -827,18 +838,17 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
                     pipeline = DiffusionPipeline.from_pretrained(
                         local_config,
                         dtype=dtype,
-                        trust_remote_code=True,
                         local_files_only=True,
                     )
                 except Exception:
                     raise split_error
             _load_transformer_weights_from_single_file(source_path, pipeline)
-
-        if split_error is not None and native_error is None and hasattr(DiffusionPipeline, "from_single_file") and _has_local_transformer_weights(local_config):
-            # Native path succeeded and set pipeline.
-            pass
-        elif split_error is not None and native_error is None and (not hasattr(DiffusionPipeline, "from_single_file") or not _has_local_transformer_weights(local_config)):
-            raise split_error
+        if pipeline is None:
+            if split_error is not None:
+                raise split_error
+            if native_error is not None:
+                raise native_error
+            raise RuntimeError("Failed to build Z-Image pipeline from single-file checkpoint.")
     else:
         raise ValueError(f"Unsupported source kind: {source_kind}")
 
@@ -938,6 +948,9 @@ def generate_zimage(
             pipeline.enable_vae_slicing()
         if hasattr(pipeline, "enable_vae_tiling"):
             pipeline.enable_vae_tiling()
+        if flavor == "turbo" and call_kwargs.get("max_sequence_length", 0) > 192:
+            call_kwargs["max_sequence_length"] = 192
+            print("[Z-Image POC] Retrying with reduced max_sequence_length=192 for lower VRAM usage.")
         output = _run_pipeline_call(pipeline, call_kwargs)
 
     return output.images[0]
