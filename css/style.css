@@ -979,3 +979,88 @@ body {
     font-size: 0.9em;
   }
 }
+
+/* =============================================================================
+   Multiselect Mode Styles
+   ============================================================================= */
+
+/* Multiselect mode checkbox */
+#library_multiselect_mode {
+  margin-top: 10px;
+}
+
+#library_multiselect_mode label {
+  font-weight: 500;
+  cursor: pointer;
+}
+
+/* Selected count badge */
+.selected-count-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  background: var(--color-accent);
+  color: white;
+  border-radius: 16px;
+  font-size: 0.9em;
+  font-weight: 500;
+  margin-left: 10px;
+}
+
+/* Delete selected button */
+.delete-selected-btn {
+  background: #dc3545 !important;
+  color: white !important;
+  border: none !important;
+}
+
+.delete-selected-btn:hover {
+  background: #c82333 !important;
+}
+
+/* Selected image indicator in gallery */
+#library_gallery .thumbnail-item.selected {
+  outline: 3px solid var(--color-accent) !important;
+  outline-offset: 2px;
+}
+
+/* Multiselect mode gallery cursor */
+#library_gallery.multiselect-mode .thumbnail-item {
+  cursor: crosshair;
+}
+
+/* Selection overlay for thumbnails */
+#library_gallery .thumbnail-item::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: transparent;
+  pointer-events: none;
+  transition: background 0.2s ease;
+}
+
+#library_gallery .thumbnail-item.selected::after {
+  background: rgba(var(--color-accent-rgb, 52, 152, 219), 0.3);
+}
+
+/* Checkmark for selected images */
+#library_gallery .thumbnail-item.selected::before {
+  content: '✓';
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 24px;
+  height: 24px;
+  background: var(--color-accent);
+  color: white;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: bold;
+  z-index: 10;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}

@@ -309,6 +309,37 @@ class ImageLibrary:
             print(f"[ImageLibrary] Error deleting {filepath}: {e}")
             return False
     
+    def delete_images(self, filepaths: list[str]) -> tuple[int, list[str]]:
+        """
+        Delete multiple image files.
+        Returns tuple of (success_count, list_of_failed_paths).
+        """
+        success_count = 0
+        failed_paths = []
+        
+        print(f"[ImageLibrary] delete_images called with {len(filepaths)} files")
+        
+        for filepath in filepaths:
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                    success_count += 1
+                    print(f"[ImageLibrary] Successfully deleted: {filepath}")
+                else:
+                    failed_paths.append(filepath)
+                    print(f"[ImageLibrary] File does not exist: {filepath}")
+            except Exception as e:
+                failed_paths.append(filepath)
+                print(f"[ImageLibrary] Error deleting {filepath}: {e}")
+        
+        # Invalidate cache if any files were deleted
+        if success_count > 0:
+            self._cache = None
+            self._tag_index = {}
+        
+        print(f"[ImageLibrary] Deleted {success_count}/{len(filepaths)} files")
+        return success_count, failed_paths
+    
     def get_image_count(self) -> int:
         """Get total number of images in the library."""
         return len(self.scan_images())
@@ -356,3 +387,8 @@ def update_image_tags(filepath: str, tags: list[str]) -> bool:
 def delete_image(filepath: str) -> bool:
     """Convenience function to delete an image."""
     return library.delete_image(filepath)
+
+
+def delete_images(filepaths: list[str]) -> tuple[int, list[str]]:
+    """Convenience function to delete multiple images."""
+    return library.delete_images(filepaths)

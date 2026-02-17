@@ -261,3 +261,110 @@ function htmlDecode(input) {
   var doc = new DOMParser().parseFromString(input, "text/html");
   return doc.documentElement.textContent;
 }
+
+/**
+ * Image Library Multiselect functionality
+ */
+var librarySelectedImages = new Set();
+
+// Initialize multiselect functionality when UI loads
+onUiLoaded(function() {
+    initLibraryMultiselect();
+});
+
+function initLibraryMultiselect() {
+    // Watch for the library gallery to be added/modified
+    const observer = new MutationObserver(function(mutations) {
+        const gallery = document.getElementById('library_gallery');
+        if (gallery) {
+            updateGallerySelectionMode();
+        }
+    });
+    
+    observer.observe(document.body, { childList: true, subtree: true });
+    
+    // Initial setup
+    setTimeout(updateGallerySelectionMode, 500);
+}
+
+function updateGallerySelectionMode() {
+    const multiselectCheckbox = document.getElementById('library_multiselect_mode');
+    const gallery = document.getElementById('library_gallery');
+    
+    if (!gallery) return;
+    
+    if (multiselectCheckbox) {
+        const isMultiselect = multiselectCheckbox.querySelector('input')?.checked;
+        
+        if (isMultiselect) {
+            gallery.classList.add('multiselect-mode');
+            // Add click handlers to thumbnails
+            const thumbnails = gallery.querySelectorAll('.thumbnail-item');
+            thumbnails.forEach(function(thumb, index) {
+                thumb.onclick = function(e) {
+                    e.stopPropagation();
+                    toggleThumbnailSelection(thumb, index);
+                };
+            });
+        } else {
+            gallery.classList.remove('multiselect-mode');
+            clearAllSelections();
+        }
+    }
+}
+
+function toggleThumbnailSelection(thumb, index) {
+    if (thumb.classList.contains('selected')) {
+        thumb.classList.remove('selected');
+        librarySelectedImages.delete(index);
+    } else {
+        thumb.classList.add('selected');
+        librarySelectedImages.add(index);
+    }
+}
+
+function clearAllSelections() {
+    const gallery = document.getElementById('library_gallery');
+    if (gallery) {
+        gallery.querySelectorAll('.thumbnail-item.selected').forEach(function(thumb) {
+            thumb.classList.remove('selected');
+        });
+    }
+    librarySelectedImages.clear();
+}
+
+// Watch for multiselect checkbox changes
+document.addEventListener('change', function(e) {
+    if (e.target.id === 'library_multiselect_mode' || 
+        e.target.closest('#library_multiselect_mode')) {
+        setTimeout(updateGallerySelectionMode, 100);
+        if (!e.target.checked) {
+            clearAllSelections();
+        }
+    }
+});
+
+// Clear selections when gallery content changes
+onUiUpdate(function(mutations) {
+    const gallery = document.getElementById('library_gallery');
+    const multiselectCheckbox = document.getElementById('library_multiselect_mode');
+    
+    if (gallery && multiselectCheckbox) {
+        const isMultiselect = multiselectCheckbox.querySelector('input')?.checked;
+        if (isMultiselect) {
+            // Re-apply selection mode to new thumbnails
+            setTimeout(function() {
+                const thumbnails = gallery.querySelectorAll('.thumbnail-item');
+                thumbnails.forEach(function(thumb, index) {
+                    if (librarySelectedImages.has(index)) {
+                        thumb.classList.add('selected');
+                    }
+                    thumb.onclick = function(e) {
+                        e.stopPropagation();
+                        toggleThumbnailSelection(thumb, index);
+                    };
+                });
+            }, 100);
+        }
+    }
+});
