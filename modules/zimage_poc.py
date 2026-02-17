@@ -688,14 +688,26 @@ def _validate_custom_text_encoder_state_dict(model, state_dict: dict, source_pat
         f"shape_mismatch={shape_mismatch}, unexpected={unexpected}"
     )
 
-    # Reject low-overlap checkpoints to avoid silent degraded outputs.
+    # Compatibility signal; strict failure can be toggled by env.
     min_matched = min(256, max(64, int(total_model * 0.35)))
-    if matched < min_matched or match_ratio_input < 0.45 or coverage_ratio_model < 0.30:
-        raise RuntimeError(
-            "Custom text encoder appears incompatible with Z-Image Turbo. "
-            f"Matched {matched}/{total_input} tensors, model coverage {coverage_ratio_model:.2%}. "
-            "Use a matching Qwen3/Z-Image text encoder or remove custom file."
-        )
+    incompatible = matched < min_matched or match_ratio_input < 0.45 or coverage_ratio_model < 0.30
+    if not incompatible:
+        return
+
+    strict = os.environ.get("FOOOCUS_ZIMAGE_STRICT_CUSTOM_TEXT_ENCODER", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    message = (
+        "Custom text encoder appears weakly compatible with Z-Image Turbo. "
+        f"source={source_path}, matched={matched}/{total_input}, coverage={coverage_ratio_model:.2%}. "
+        "Use a matching Qwen3/Z-Image text encoder for best results."
+    )
+    if strict:
+        raise RuntimeError(message)
+    print(f"[Z-Image POC] WARNING: {message} Continuing in permissive mode.")
 
 
 def _find_custom_vae_file(vae_dir: str) -> Optional[str]:
@@ -923,8 +935,8 @@ def _build_pipeline_from_single_file_components(
                     model,
                     external_sd,
                     label="text_encoder(custom)",
-                    missing_limit=max(256, int(len(model_keys) * 0.45)),
-                    unexpected_limit=max(256, int(len(model_keys) * 0.45)),
+                    missing_limit=None,
+                    unexpected_limit=None,
                 )
             except Exception as e:
                 raise RuntimeError(f"Failed custom text_encoder load from {custom_text_encoder_path}: {e}") from e
