@@ -33,8 +33,9 @@ def _put_prompt_cache(key: tuple, value: tuple) -> None:
         _PROMPT_EMBED_CACHE.pop(first, None)
 
 
-def _cleanup_memory(cuda: bool = True) -> None:
-    gc.collect()
+def _cleanup_memory(cuda: bool = True, aggressive: bool = True) -> None:
+    if aggressive:
+        gc.collect()
     if not cuda:
         return
     try:
@@ -42,7 +43,7 @@ def _cleanup_memory(cuda: bool = True) -> None:
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            if hasattr(torch.cuda, "ipc_collect"):
+            if aggressive and hasattr(torch.cuda, "ipc_collect"):
                 torch.cuda.ipc_collect()
     except Exception:
         pass
@@ -1010,16 +1011,14 @@ def _ensure_zimage_runtime_compatibility() -> None:
 def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_folders: list[str]):
     cache_key = f"{source_kind}:{os.path.abspath(source_path)}"
     if cache_key in _PIPELINE_CACHE:
-        pipeline, _, _ = _PIPELINE_CACHE[cache_key]
+        pipeline, generator_device, used_offload = _PIPELINE_CACHE[cache_key]
         if _pipeline_has_meta_tensors(pipeline):
             print("[Z-Image POC] Cached pipeline has meta tensors, rebuilding pipeline.")
             _PIPELINE_CACHE.pop(cache_key, None)
             _clear_prompt_cache_for_pipeline(cache_key)
             return _load_pipeline(source_kind, source_path, flavor, checkpoint_folders)
-        device, _ = _pick_device_and_dtype()
-        generator_device, used_offload = _prepare_pipeline_memory_mode(pipeline, device)
-        _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
-        return _PIPELINE_CACHE[cache_key]
+        # Keep cached memory mode for throughput; mode hardening is handled at load/OOM time.
+        return pipeline, generator_device, used_offload
 
     from diffusers import DiffusionPipeline
 
@@ -1190,7 +1189,7 @@ def generate_zimage(
     cache_key = f"{source_kind}:{os.path.abspath(source_path)}"
     pipeline, generator_device, used_offload = _load_pipeline(source_kind, source_path, flavor, checkpoint_folders)
     if generator_device == "cuda":
-        _cleanup_memory(cuda=True)
+        _cleanup_memory(cuda=True, aggressive=False)
     generator = torch.Generator(device=generator_device).manual_seed(seed)
 
     # Align scheduler shift with Forge-style "Shift" control when available.
@@ -1301,12 +1300,14 @@ def generate_zimage(
                     raise
 
                 print("[Z-Image POC] CUDA OOM detected, retrying with stricter offload mode.")
-                _cleanup_memory(cuda=True)
+                _cleanup_memory(cuda=True, aggressive=True)
+                pipeline._zimage_last_oom = True
 
                 if hasattr(pipeline, "enable_sequential_cpu_offload"):
                     pipeline.enable_sequential_cpu_offload()
                     pipeline._zimage_memory_mode = "sequential_offload"
                     used_offload = True
+                    _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
                 if hasattr(pipeline, "enable_attention_slicing"):
                     pipeline.enable_attention_slicing("max")
                 if hasattr(pipeline, "enable_vae_slicing"):
@@ -1347,4 +1348,7 @@ def generate_zimage(
             call_kwargs.clear()
         except Exception:
             pass
-        _cleanup_memory(cuda=(generator_device == "cuda"))
+        had_oom = bool(getattr(pipeline, "_zimage_last_oom", False))
+        if hasattr(pipeline, "_zimage_last_oom"):
+            pipeline._zimage_last_oom = False
+        _cleanup_memory(cuda=(generator_device == "cuda"), aggressive=had_oom)
