@@ -72,6 +72,15 @@ def _zimage_perf_profile() -> str:
     return profile
 
 
+def _zimage_xformers_mode() -> str:
+    value = os.environ.get("FOOOCUS_ZIMAGE_XFORMERS", "auto").strip().lower()
+    if value in ("1", "true", "yes", "on", "force"):
+        return "on"
+    if value in ("0", "false", "no", "off", "disable"):
+        return "off"
+    return "auto"
+
+
 def _round_up_to_supported_seq(value: int, max_cap: int) -> int:
     buckets = [32, 64, 96, 128, 160, 192, 256, 384, 512]
     cap = max(32, int(max_cap))
@@ -1200,6 +1209,51 @@ def _preflight_generation_memory_mode(
     return generator_device, used_offload
 
 
+def _maybe_enable_xformers(pipeline, profile: str) -> None:
+    mode = _zimage_xformers_mode()
+    if mode == "off":
+        return
+    if mode == "auto" and profile not in ("balanced", "speed"):
+        return
+    if getattr(pipeline, "_zimage_xformers_attempted", False):
+        return
+    pipeline._zimage_xformers_attempted = True
+
+    if not hasattr(pipeline, "enable_xformers_memory_efficient_attention"):
+        if mode == "on":
+            print("[Z-Image POC] xFormers requested but pipeline does not expose xFormers attention API.")
+        return
+
+    try:
+        pipeline.enable_xformers_memory_efficient_attention()
+        pipeline._zimage_xformers_enabled = True
+        print(f"[Z-Image POC] Enabled xFormers memory efficient attention (mode={mode}).")
+    except Exception as e:
+        pipeline._zimage_xformers_enabled = False
+        if mode == "on":
+            print(f"[Z-Image POC] Failed to enable xFormers attention: {e}")
+
+
+def _should_cleanup_cuda_cache(profile: str, had_oom: bool, pipeline) -> bool:
+    if had_oom:
+        return True
+    if profile == "safe":
+        return True
+
+    mode = getattr(pipeline, "_zimage_memory_mode", "unset")
+    free_gb, _ = _cuda_mem_info_gb()
+    low_free = free_gb > 0 and free_gb < 0.9
+
+    if profile == "balanced":
+        # Keep throughput high for offload modes, but still clean up under pressure.
+        if mode == "full_gpu" or low_free:
+            return True
+        return False
+
+    # speed profile: only clean if VRAM is very tight.
+    return free_gb > 0 and free_gb < 0.5
+
+
 def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
     """
     Returns (generator_device, used_offload_mode).
@@ -1216,6 +1270,7 @@ def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
             torch.backends.cuda.matmul.allow_tf32 = True
         except Exception:
             pass
+        _maybe_enable_xformers(pipeline, profile)
 
         if profile == "safe":
             if hasattr(pipeline, "enable_attention_slicing"):
@@ -1479,9 +1534,8 @@ def generate_zimage(
     cache_key = f"{source_kind}:{os.path.abspath(source_path)}"
     profile = _zimage_perf_profile()
     pipeline, generator_device, used_offload = _load_pipeline(source_kind, source_path, flavor, checkpoint_folders)
-    if generator_device == "cuda":
-        if profile != "speed":
-            _cleanup_memory(cuda=True, aggressive=False)
+    if generator_device == "cuda" and _should_cleanup_cuda_cache(profile, had_oom=False, pipeline=pipeline):
+        _cleanup_memory(cuda=True, aggressive=False)
 
     # Align scheduler shift with Forge-style "Shift" control when available.
     try:
@@ -1679,5 +1733,8 @@ def generate_zimage(
         had_oom = bool(getattr(pipeline, "_zimage_last_oom", False))
         if hasattr(pipeline, "_zimage_last_oom"):
             pipeline._zimage_last_oom = False
-        if not (profile == "speed" and not had_oom):
-            _cleanup_memory(cuda=(generator_device == "cuda"), aggressive=had_oom)
+        if generator_device == "cuda":
+            if _should_cleanup_cuda_cache(profile, had_oom=had_oom, pipeline=pipeline):
+                _cleanup_memory(cuda=True, aggressive=had_oom)
+        else:
+            _cleanup_memory(cuda=False, aggressive=had_oom)
