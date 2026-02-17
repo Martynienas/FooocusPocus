@@ -6,6 +6,8 @@ from typing import Optional
 
 
 _PIPELINE_CACHE = {}
+_PROMPT_EMBED_CACHE = {}
+_MAX_PROMPT_CACHE_ITEMS = 32
 _TOKENIZER_JSON_SHA256 = {
     "Tongyi-MAI/Z-Image-Turbo": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
 }
@@ -13,6 +15,21 @@ _TOKENIZER_JSON_SHA256 = {
 
 def _project_root() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _clear_prompt_cache_for_pipeline(cache_key: str) -> None:
+    stale = [k for k in _PROMPT_EMBED_CACHE.keys() if isinstance(k, tuple) and k and k[0] == cache_key]
+    for k in stale:
+        _PROMPT_EMBED_CACHE.pop(k, None)
+
+
+def _put_prompt_cache(key: tuple, value: tuple) -> None:
+    if key in _PROMPT_EMBED_CACHE:
+        _PROMPT_EMBED_CACHE.pop(key, None)
+    _PROMPT_EMBED_CACHE[key] = value
+    while len(_PROMPT_EMBED_CACHE) > _MAX_PROMPT_CACHE_ITEMS:
+        first = next(iter(_PROMPT_EMBED_CACHE))
+        _PROMPT_EMBED_CACHE.pop(first, None)
 
 
 def _universal_zimage_root() -> str:
@@ -908,6 +925,7 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
         if _pipeline_has_meta_tensors(pipeline):
             print("[Z-Image POC] Cached pipeline has meta tensors, rebuilding pipeline.")
             _PIPELINE_CACHE.pop(cache_key, None)
+            _clear_prompt_cache_for_pipeline(cache_key)
             return _load_pipeline(source_kind, source_path, flavor, checkpoint_folders)
         device, _ = _pick_device_and_dtype()
         generator_device, used_offload = _prepare_pipeline_memory_mode(pipeline, device)
@@ -1088,8 +1106,45 @@ def generate_zimage(
     if forced_max_seq is not None:
         max_sequence_length = min(max_sequence_length, int(forced_max_seq))
 
+    use_cfg = guidance_scale > 1.0
+    neg_key = negative_prompt if use_cfg else ""
+    embed_cache_key = (
+        cache_key,
+        prompt,
+        neg_key,
+        int(max_sequence_length),
+        bool(use_cfg),
+    )
+
+    prompt_embeds = None
+    negative_prompt_embeds = None
+    cached_embeds = _PROMPT_EMBED_CACHE.get(embed_cache_key, None)
+    if cached_embeds is not None:
+        cached_pos, cached_neg = cached_embeds
+        prompt_embeds = [x.to(device=generator_device, dtype=pipeline.transformer.dtype) for x in cached_pos]
+        if cached_neg:
+            negative_prompt_embeds = [x.to(device=generator_device, dtype=pipeline.transformer.dtype) for x in cached_neg]
+        else:
+            negative_prompt_embeds = []
+    else:
+        pos, neg = pipeline.encode_prompt(
+            prompt=prompt,
+            negative_prompt=negative_prompt if use_cfg else None,
+            do_classifier_free_guidance=use_cfg,
+            device=generator_device,
+            max_sequence_length=max_sequence_length,
+        )
+        cpu_pos = [x.detach().to("cpu", copy=True) for x in pos]
+        cpu_neg = [x.detach().to("cpu", copy=True) for x in neg] if neg else []
+        _put_prompt_cache(embed_cache_key, (cpu_pos, cpu_neg))
+        prompt_embeds = [x.to(device=generator_device, dtype=pipeline.transformer.dtype) for x in cpu_pos]
+        if cpu_neg:
+            negative_prompt_embeds = [x.to(device=generator_device, dtype=pipeline.transformer.dtype) for x in cpu_neg]
+        else:
+            negative_prompt_embeds = []
+
     call_kwargs = dict(
-        prompt=prompt,
+        prompt=None,
         width=width,
         height=height,
         num_inference_steps=steps,
@@ -1099,9 +1154,9 @@ def generate_zimage(
         cfg_normalization=False,
         cfg_truncation=1.0,
         max_sequence_length=max_sequence_length,
+        prompt_embeds=prompt_embeds,
+        negative_prompt_embeds=negative_prompt_embeds,
     )
-    if negative_prompt and guidance_scale > 1.0:
-        call_kwargs["negative_prompt"] = negative_prompt
     print(
         f"[Z-Image POC] Runtime params: steps={steps}, guidance={guidance_scale}, shift={shift}, "
         f"max_seq={max_sequence_length}, offload={used_offload}"
@@ -1141,6 +1196,7 @@ def generate_zimage(
     except Exception:
         # Prevent poisoned/corrupted cache from breaking next generation request.
         _PIPELINE_CACHE.pop(cache_key, None)
+        _clear_prompt_cache_for_pipeline(cache_key)
         if generator_device == "cuda":
             torch.cuda.empty_cache()
         raise
