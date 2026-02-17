@@ -1358,7 +1358,7 @@ def generate_zimage(
     steps: int,
     guidance_scale: float,
     seed: int,
-    shift: float = 9.0,
+    shift: float = 3.0,
 ):
     import torch
 

@@ -886,8 +886,12 @@ def worker():
         async_task.sampler_name = 'euler'
         async_task.scheduler_name = 'beta' if 'beta' in flags.scheduler_list else 'sgm_uniform'
         async_task.cfg_scale = 1.0
-        # In Forge this control is displayed as "Shift" for Z-Image Turbo (default 9.0).
-        async_task.adaptive_cfg = 9.0
+        # Shift control for Z-Image Turbo.
+        # ComfyUI Turbo workflows commonly run shift=3.0; allow override via env.
+        try:
+            async_task.adaptive_cfg = float(os.environ.get('FOOOCUS_ZIMAGE_TURBO_SHIFT', '3.0'))
+        except Exception:
+            async_task.adaptive_cfg = 3.0
         async_task.sharpness = 0.0
         async_task.refiner_switch = 1.0
         async_task.adm_scaler_positive = 1.0
