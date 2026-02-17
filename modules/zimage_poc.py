@@ -573,13 +573,42 @@ def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
         if hasattr(pipeline, "enable_vae_tiling"):
             pipeline.enable_vae_tiling()
 
-        vram_gb = _cuda_total_vram_gb()
-        if vram_gb > 0 and vram_gb <= 12.6 and hasattr(pipeline, "enable_model_cpu_offload"):
+        total_vram_gb = _cuda_total_vram_gb()
+        free_vram_gb = 0.0
+        try:
+            free_bytes, total_bytes = torch.cuda.mem_get_info(torch.cuda.current_device())
+            free_vram_gb = float(free_bytes) / float(1024**3)
+            if total_vram_gb <= 0:
+                total_vram_gb = float(total_bytes) / float(1024**3)
+        except Exception:
+            pass
+
+        pressure = (free_vram_gb / total_vram_gb) if total_vram_gb > 0 else 0.0
+
+        if hasattr(pipeline, "enable_sequential_cpu_offload") and (
+            (total_vram_gb > 0 and total_vram_gb <= 10.0) or pressure < 0.30
+        ):
+            pipeline.enable_sequential_cpu_offload()
+            used_offload = True
+            print(
+                f"[Z-Image POC] Using sequential CPU offload "
+                f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f})."
+            )
+        elif hasattr(pipeline, "enable_model_cpu_offload") and (
+            (total_vram_gb > 0 and total_vram_gb <= 18.0) or pressure < 0.55
+        ):
             pipeline.enable_model_cpu_offload()
             used_offload = True
-            print(f"[Z-Image POC] Using model CPU offload mode for {vram_gb:.2f} GB VRAM.")
+            print(
+                f"[Z-Image POC] Using model CPU offload "
+                f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f})."
+            )
         else:
             pipeline.to(device)
+            print(
+                f"[Z-Image POC] Using full-GPU mode "
+                f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f})."
+            )
     else:
         pipeline.to(device)
 

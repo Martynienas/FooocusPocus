@@ -882,17 +882,18 @@ def worker():
             print('Refiner disabled in Z-Image Turbo mode.')
             async_task.refiner_model_name = 'None'
 
+        # Match Forge Z-Image Turbo ("zit") defaults.
         async_task.sampler_name = 'euler'
-        async_task.scheduler_name = 'sgm_uniform'
+        async_task.scheduler_name = 'beta' if 'beta' in flags.scheduler_list else 'sgm_uniform'
         async_task.cfg_scale = 1.0
-        async_task.adaptive_cfg = 1.0
+        # In Forge this control is displayed as "Shift" for Z-Image Turbo (default 9.0).
+        async_task.adaptive_cfg = 9.0
         async_task.sharpness = 0.0
         async_task.refiner_switch = 1.0
         async_task.adm_scaler_positive = 1.0
         async_task.adm_scaler_negative = 1.0
         async_task.adm_scaler_end = 0.0
-        if async_task.steps > 8:
-            async_task.steps = 4
+        async_task.steps = 9
 
     def run_zimage_poc(async_task, width, height, current_progress):
         source_kind, source_path, flavor = modules.zimage_poc.resolve_zimage_source(
