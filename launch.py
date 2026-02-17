@@ -1,6 +1,8 @@
 import os
 import ssl
 import sys
+import importlib.metadata
+import packaging.version
 
 print('[System ARGV] ' + str(sys.argv))
 
@@ -26,16 +28,32 @@ REINSTALL_ALL = False
 TRY_INSTALL_XFORMERS = False
 
 
+def torch_stack_is_compatible(min_torch_version: str = "2.2.0") -> bool:
+    try:
+        torch_version_raw = importlib.metadata.version("torch")
+        torch_version = torch_version_raw.split("+", 1)[0]
+        return packaging.version.parse(torch_version) >= packaging.version.parse(min_torch_version)
+    except Exception:
+        return False
+
+
 def prepare_environment():
     torch_index_url = os.environ.get('TORCH_INDEX_URL', "https://download.pytorch.org/whl/cu121")
     torch_command = os.environ.get('TORCH_COMMAND',
-                                   f"pip install torch==2.1.0 torchvision==0.16.0 --extra-index-url {torch_index_url}")
+                                   f"pip install torch==2.5.1 torchvision==0.20.1 --extra-index-url {torch_index_url}")
     requirements_file = os.environ.get('REQS_FILE', "requirements_versions.txt")
 
     print(f"Python {sys.version}")
     print(f"Fooocus version: {fooocus_version.version}")
 
-    if REINSTALL_ALL or not is_installed("torch") or not is_installed("torchvision"):
+    need_torch_stack_install = (
+        REINSTALL_ALL
+        or not is_installed("torch")
+        or not is_installed("torchvision")
+        or not torch_stack_is_compatible("2.2.0")
+    )
+    if need_torch_stack_install:
+        print("Installing/upgrading torch stack (requires torch>=2.2 for current transformers).")
         run(f'"{python}" -m {torch_command}', "Installing torch and torchvision", "Couldn't install torch", live=True)
 
     if TRY_INSTALL_XFORMERS:
