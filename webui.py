@@ -1857,9 +1857,11 @@ with shared.gradio_root:
             if auto_load:
                 from modules.image_library import ImageLibrary
                 lib = ImageLibrary()
-                images = lib.get_all_images()
+                images = lib.scan_images()
+                # Convert to gallery format: list of [path, caption] or dict format
+                gallery_images = [[img['path'], img.get('filename', '')] for img in images]
                 tags = lib.get_all_tags()
-                return gr.update(visible=True), gr.update(value=images), gr.update(choices=tags)
+                return gr.update(visible=True), gr.update(value=gallery_images), gr.update(choices=list(tags.keys()))
             return gr.update(visible=True), gr.update(), gr.update()
         
         def close_library_modal():
