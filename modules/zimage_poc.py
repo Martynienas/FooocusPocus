@@ -698,6 +698,61 @@ def _validate_custom_text_encoder_state_dict(model, state_dict: dict, source_pat
         )
 
 
+def _find_custom_vae_file(vae_dir: str) -> Optional[str]:
+    if not os.path.isdir(vae_dir):
+        return None
+    preferred = os.path.join(vae_dir, "ae.safetensors")
+    if os.path.isfile(preferred):
+        return preferred
+    for cand in sorted(glob.glob(os.path.join(vae_dir, "*.safetensors")), key=str.casefold):
+        base = os.path.basename(cand).lower()
+        if base not in ("diffusion_pytorch_model.safetensors", "model.safetensors"):
+            return cand
+    return None
+
+
+def _load_custom_vae_state_dict(path: str) -> dict:
+    from safetensors import safe_open
+
+    prefixes = ["vae.", "first_stage_model.", "first_stage_model.model.", "autoencoder.", "model."]
+    state_dict = {}
+    with safe_open(path, framework="pt", device="cpu") as f:
+        for key in f.keys():
+            mapped = key
+            for pref in prefixes:
+                if key.startswith(pref):
+                    mapped = key[len(pref):]
+                    break
+            state_dict[mapped] = f.get_tensor(key)
+    return state_dict
+
+
+def _validate_custom_vae_state_dict(model, state_dict: dict, source_path: str) -> None:
+    model_sd = model.state_dict()
+    stats = _custom_state_dict_compatibility(state_dict, model_sd)
+    matched = int(stats["matched"])
+    shape_mismatch = int(stats["shape_mismatch"])
+    unexpected = int(stats["unexpected"])
+    match_ratio_input = stats["match_ratio_input"]
+    coverage_ratio_model = stats["coverage_ratio_model"]
+    total_input = len(state_dict)
+    total_model = len(model_sd)
+
+    print(
+        "[Z-Image POC] custom vae compatibility: "
+        f"matched={matched}/{total_input} ({match_ratio_input:.2%}), "
+        f"coverage={matched}/{total_model} ({coverage_ratio_model:.2%}), "
+        f"shape_mismatch={shape_mismatch}, unexpected={unexpected}"
+    )
+
+    min_matched = min(192, max(48, int(total_model * 0.30)))
+    if matched < min_matched or match_ratio_input < 0.35 or coverage_ratio_model < 0.25:
+        raise RuntimeError(
+            "Custom VAE appears incompatible with current Z-Image VAE architecture. "
+            f"Matched {matched}/{total_input} tensors, model coverage {coverage_ratio_model:.2%}."
+        )
+
+
 def _remap_state_dict_to_model_keys(state_dict: dict, model_keys: set[str], label: str, verbose: bool = True) -> dict:
     if not state_dict:
         return state_dict
@@ -807,10 +862,21 @@ def _build_pipeline_from_single_file_components(
         want_single_file_weights = bool(parts.get(component_name))
         if component_name == "text_encoder" and custom_text_encoder_kind == "directory" and custom_text_encoder_path:
             comp_path = custom_text_encoder_path
+        custom_vae_file = _find_custom_vae_file(comp_path) if component_name == "vae" else None
 
         if component_name == "text_encoder" and want_single_file_weights:
             config = AutoConfig.from_pretrained(comp_path, local_files_only=True, trust_remote_code=True)
             model = AutoModel.from_config(config, trust_remote_code=True)
+        elif component_name == "vae" and custom_vae_file and not want_single_file_weights:
+            if hasattr(cls, "load_config") and hasattr(cls, "from_config"):
+                model = cls.from_config(cls.load_config(comp_path))
+            else:
+                model = _call_with_dtype_compat(
+                    cls.from_pretrained,
+                    dtype,
+                    {"pretrained_model_name_or_path": comp_path, "local_files_only": True},
+                    f"{component_name}.from_pretrained",
+                )
         elif want_single_file_weights:
             if hasattr(cls, "load_config") and hasattr(cls, "from_config"):
                 model = cls.from_config(cls.load_config(comp_path))
@@ -862,6 +928,23 @@ def _build_pipeline_from_single_file_components(
                 )
             except Exception as e:
                 raise RuntimeError(f"Failed custom text_encoder load from {custom_text_encoder_path}: {e}") from e
+
+        if component_name == "vae" and custom_vae_file and not want_single_file_weights:
+            try:
+                external_sd = _load_custom_vae_state_dict(custom_vae_file)
+                model_keys = set(model.state_dict().keys())
+                external_sd = _remap_state_dict_to_model_keys(external_sd, model_keys, "vae(custom)")
+                _validate_custom_vae_state_dict(model, external_sd, custom_vae_file)
+                _apply_component_state_dict(
+                    model,
+                    external_sd,
+                    label="vae(custom)",
+                    missing_limit=max(192, int(len(model_keys) * 0.45)),
+                    unexpected_limit=max(192, int(len(model_keys) * 0.45)),
+                )
+                print(f"[Z-Image POC] Using custom VAE file: {custom_vae_file}")
+            except Exception as e:
+                raise RuntimeError(f"Failed custom VAE load from {custom_vae_file}: {e}") from e
 
         if hasattr(model, "to"):
             model = model.to(dtype=dtype)
