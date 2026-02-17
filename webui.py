@@ -2131,7 +2131,7 @@ with shared.gradio_root:
             outputs=[library_selected_image, library_image_info, library_load_settings_btn, 
                      library_delete_btn, library_edit_tags, library_save_tags_btn, library_selected_path,
                      library_selected_paths, library_selected_count, library_delete_selected_btn, library_selected_list],
-            _js='() => { if (typeof clearAllSelections === "function") { clearAllSelections(); } }'
+            _js='(gallery, selected_paths) => { if (typeof clearAllSelections === "function") { clearAllSelections(); } return [gallery, selected_paths]; }'
         )
         
         # Delete selected images button
@@ -2140,7 +2140,7 @@ with shared.gradio_root:
             inputs=[library_selected_paths],
             outputs=[library_gallery, library_selected_image, library_selected_paths, 
                      library_selected_count, library_delete_selected_btn, library_selected_list],
-            _js='() => { if (typeof clearAllSelections === "function") { clearAllSelections(); } }'
+            _js='(selected_paths) => { if (typeof clearAllSelections === "function") { clearAllSelections(); } return [selected_paths]; }'
         )
         
         # Checkbox trigger for multi-select
