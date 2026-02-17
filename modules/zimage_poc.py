@@ -1209,19 +1209,70 @@ def _preflight_generation_memory_mode(
     return generator_device, used_offload
 
 
+def _is_zimage_pipeline(pipeline) -> bool:
+    try:
+        class_name = str(getattr(pipeline.__class__, "__name__", "")).lower()
+        if "zimage" in class_name:
+            return True
+    except Exception:
+        pass
+    try:
+        cfg = getattr(pipeline, "config", None)
+        if isinstance(cfg, dict):
+            cfg_name = str(cfg.get("_class_name", "")).lower()
+        else:
+            cfg_name = str(getattr(cfg, "_class_name", "")).lower()
+        if "zimage" in cfg_name:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _disable_xformers_for_pipeline(pipeline, reason: str = "") -> bool:
+    changed = False
+    if hasattr(pipeline, "disable_xformers_memory_efficient_attention"):
+        try:
+            pipeline.disable_xformers_memory_efficient_attention()
+            changed = True
+        except Exception:
+            pass
+    pipeline._zimage_xformers_enabled = False
+    if changed:
+        suffix = f" ({reason})" if reason else ""
+        print(f"[Z-Image POC] Disabled xFormers attention{suffix}.")
+    return changed
+
+
 def _maybe_enable_xformers(pipeline, profile: str) -> None:
     mode = _zimage_xformers_mode()
     if mode == "off":
+        pipeline._zimage_xformers_enabled = False
         return
     if mode == "auto" and profile not in ("balanced", "speed"):
+        pipeline._zimage_xformers_enabled = False
         return
     if getattr(pipeline, "_zimage_xformers_attempted", False):
         return
     pipeline._zimage_xformers_attempted = True
 
+    # Current Z-Image pipeline passes cross_attention_kwargs (freqs_cis)
+    # that xFormers attention processors do not handle correctly.
+    if _is_zimage_pipeline(pipeline) and not _truthy_env("FOOOCUS_ZIMAGE_XFORMERS_ALLOW_UNSAFE", "0"):
+        pipeline._zimage_xformers_enabled = False
+        if mode == "on":
+            print(
+                "[Z-Image POC] xFormers requested but disabled for Z-Image due known freqs_cis incompatibility. "
+                "Set FOOOCUS_ZIMAGE_XFORMERS_ALLOW_UNSAFE=1 to force."
+            )
+        elif mode == "auto":
+            print("[Z-Image POC] Skipping xFormers for Z-Image pipeline (known freqs_cis incompatibility).")
+        return
+
     if not hasattr(pipeline, "enable_xformers_memory_efficient_attention"):
         if mode == "on":
             print("[Z-Image POC] xFormers requested but pipeline does not expose xFormers attention API.")
+        pipeline._zimage_xformers_enabled = False
         return
 
     try:
@@ -1676,6 +1727,23 @@ def generate_zimage(
                 break
             except RuntimeError as e:
                 msg = str(e).lower()
+
+                xformers_mismatch = (
+                    "xformersattnprocessor" in msg
+                    or "cross_attention_kwargs" in msg
+                    or "expanded size of the tensor" in msg
+                    or "freqs_cis" in msg
+                )
+                if xformers_mismatch:
+                    disabled = _disable_xformers_for_pipeline(
+                        pipeline, reason="runtime mismatch with Z-Image attention kwargs"
+                    )
+                    if disabled and attempt < 2:
+                        print("[Z-Image POC] Retrying after disabling xFormers for Z-Image compatibility.")
+                        _cleanup_memory(cuda=(generator_device == "cuda"), aggressive=True)
+                        _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
+                        continue
+
                 if "out of memory" not in msg or generator_device != "cuda":
                     raise
                 if attempt >= 2:
