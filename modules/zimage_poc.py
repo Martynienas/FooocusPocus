@@ -1,6 +1,7 @@
 import json
 import os
 import hashlib
+import importlib
 from typing import Optional
 
 
@@ -317,24 +318,40 @@ def _ensure_single_file_component_dir(
     return local_config, try_config_only_text_encoder
 
 
-def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) -> None:
+def _extract_prefixed_state_dict(sd: dict, prefixes: list[str]) -> dict:
+    for pref in prefixes:
+        part = {k[len(pref):]: v for k, v in sd.items() if k.startswith(pref)}
+        if part:
+            return part
+    return {}
+
+
+def _split_single_file_state_dict(single_file_path: str) -> dict[str, dict]:
     from safetensors.torch import load_file
 
     sd = load_file(single_file_path, device="cpu")
+    transformer_sd = _extract_prefixed_state_dict(
+        sd,
+        ["model.diffusion_model.", "diffusion_model.", "transformer."],
+    )
+    text_sd = _extract_prefixed_state_dict(
+        sd,
+        ["text_encoders.qwen3_4b.", "text_encoder.", "qwen3_4b.transformer.", "qwen3_4b."],
+    )
+    vae_sd = _extract_prefixed_state_dict(
+        sd,
+        ["vae.", "first_stage_model."],
+    )
+    return {
+        "transformer": transformer_sd,
+        "text_encoder": text_sd,
+        "vae": vae_sd,
+    }
 
-    def extract_prefixed(prefixes: list[str]) -> dict:
-        for pref in prefixes:
-            part = {k[len(pref):]: v for k, v in sd.items() if k.startswith(pref)}
-            if part:
-                return part
-        return {}
 
-    # Common Forge/Comfy prefixes.
-    transformer_sd = extract_prefixed([
-        "model.diffusion_model.",
-        "diffusion_model.",
-        "transformer.",
-    ])
+def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) -> None:
+    parts = _split_single_file_state_dict(single_file_path)
+    transformer_sd = parts["transformer"]
 
     if not transformer_sd:
         raise RuntimeError(
@@ -356,11 +373,7 @@ def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) 
 
     # Optional: if single-file includes text encoder / VAE weights, prefer them.
     if hasattr(pipeline, "text_encoder") and pipeline.text_encoder is not None:
-        text_sd = extract_prefixed([
-            "text_encoders.qwen3_4b.",
-            "text_encoder.",
-            "qwen3_4b.",
-        ])
+        text_sd = parts["text_encoder"]
         if text_sd:
             try:
                 pipeline.text_encoder.load_state_dict(text_sd, strict=False)
@@ -369,16 +382,96 @@ def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) 
                 print(f"[Z-Image POC] Skipped text_encoder weights from single-file: {e}")
 
     if hasattr(pipeline, "vae") and pipeline.vae is not None:
-        vae_sd = extract_prefixed([
-            "vae.",
-            "first_stage_model.",
-        ])
+        vae_sd = parts["vae"]
         if vae_sd:
             try:
                 pipeline.vae.load_state_dict(vae_sd, strict=False)
                 print(f"[Z-Image POC] Loaded VAE weights from single-file ({len(vae_sd)} tensors).")
             except Exception as e:
                 print(f"[Z-Image POC] Skipped VAE weights from single-file: {e}")
+
+
+def _apply_component_state_dict(component, state_dict: dict, label: str, missing_limit: int = 999999, unexpected_limit: int = 999999):
+    if component is None or not state_dict:
+        return
+    missing, unexpected = component.load_state_dict(state_dict, strict=False)
+    if len(unexpected) > unexpected_limit:
+        raise RuntimeError(f"{label} weight mismatch too large (unexpected={len(unexpected)}).")
+    if len(missing) > missing_limit:
+        raise RuntimeError(f"{label} weight mismatch too large (missing={len(missing)}).")
+    print(f"[Z-Image POC] Loaded {label} from single-file ({len(state_dict)} tensors).")
+
+
+def _build_pipeline_from_single_file_components(local_config: str, single_file_path: str, torch_dtype):
+    from diffusers import DiffusionPipeline
+    from transformers import AutoConfig, AutoModel
+
+    model_index = _read_json(os.path.join(local_config, "model_index.json"))
+    parts = _split_single_file_state_dict(single_file_path)
+
+    pipeline_class_name = str(model_index.get("_class_name", ""))
+    pipeline_cls = getattr(importlib.import_module("diffusers"), pipeline_class_name, None)
+    if pipeline_cls is None:
+        raise RuntimeError(
+            f"diffusers is missing {pipeline_class_name}. "
+            "Install/upgrade with: python -m pip install -U diffusers==0.36.0 transformers==4.56.2 safetensors accelerate"
+        )
+
+    components = {}
+    for component_name, spec in model_index.items():
+        if component_name.startswith("_"):
+            continue
+        if not (isinstance(spec, list) and len(spec) == 2):
+            continue
+
+        lib_name, cls_name = spec
+        comp_path = os.path.join(local_config, component_name)
+        lib = importlib.import_module(lib_name)
+        cls = getattr(lib, cls_name)
+
+        if component_name == "scheduler":
+            components[component_name] = cls.from_pretrained(comp_path, local_files_only=True)
+            continue
+        if component_name.startswith("tokenizer"):
+            components[component_name] = cls.from_pretrained(comp_path, local_files_only=True)
+            continue
+
+        want_single_file_weights = bool(parts.get(component_name))
+
+        if component_name == "text_encoder" and want_single_file_weights:
+            config = AutoConfig.from_pretrained(comp_path, local_files_only=True, trust_remote_code=True)
+            model = AutoModel.from_config(config, trust_remote_code=True)
+        elif want_single_file_weights:
+            if hasattr(cls, "load_config") and hasattr(cls, "from_config"):
+                model = cls.from_config(cls.load_config(comp_path))
+            else:
+                model = cls.from_pretrained(comp_path, local_files_only=True, torch_dtype=torch_dtype)
+        else:
+            model = cls.from_pretrained(comp_path, local_files_only=True, torch_dtype=torch_dtype)
+
+        if hasattr(model, "to"):
+            model = model.to(dtype=torch_dtype)
+        components[component_name] = model
+
+    pipeline = pipeline_cls(**components)
+
+    _apply_component_state_dict(
+        getattr(pipeline, "transformer", None),
+        parts["transformer"],
+        label="transformer",
+        missing_limit=256,
+        unexpected_limit=64,
+    )
+    _apply_component_state_dict(getattr(pipeline, "text_encoder", None), parts["text_encoder"], label="text_encoder")
+    _apply_component_state_dict(getattr(pipeline, "vae", None), parts["vae"], label="vae")
+
+    if not parts["transformer"]:
+        raise RuntimeError("Single-file Z-Image checkpoint does not contain transformer weights in expected format.")
+
+    if isinstance(pipeline, DiffusionPipeline):
+        pipeline.set_progress_bar_config(disable=True)
+
+    return pipeline
 
 
 def resolve_zimage_source(name: str, checkpoint_folders: list[str], auto_download_if_missing: bool = False) -> tuple[Optional[str], Optional[str], str]:
@@ -407,12 +500,50 @@ def _pick_device_and_dtype():
     return "cpu", torch.float32
 
 
+def _ensure_zimage_runtime_compatibility() -> None:
+    missing = []
+    try:
+        import diffusers
+    except Exception as e:
+        raise RuntimeError(
+            f"Z-Image runtime missing diffusers ({e}). "
+            "Install/upgrade with: python -m pip install -U diffusers==0.36.0 transformers==4.56.2 safetensors accelerate"
+        ) from e
+
+    try:
+        import transformers
+    except Exception as e:
+        raise RuntimeError(
+            f"Z-Image runtime missing transformers ({e}). "
+            "Install/upgrade with: python -m pip install -U transformers==4.56.2"
+        ) from e
+
+    if not hasattr(diffusers, "ZImagePipeline"):
+        missing.append("diffusers.ZImagePipeline")
+    if not hasattr(diffusers, "ZImageTransformer2DModel"):
+        missing.append("diffusers.ZImageTransformer2DModel")
+    if not hasattr(transformers, "Qwen3Model"):
+        missing.append("transformers.Qwen3Model")
+
+    if missing:
+        dv = getattr(diffusers, "__version__", "unknown")
+        tv = getattr(transformers, "__version__", "unknown")
+        raise RuntimeError(
+            "Z-Image backend is too old for this model. Missing: "
+            + ", ".join(missing)
+            + f". Current versions: diffusers={dv}, transformers={tv}. "
+            "Install/upgrade with: python -m pip install -U diffusers==0.36.0 transformers==4.56.2 safetensors accelerate"
+        )
+
+
 def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_folders: list[str]):
     cache_key = f"{source_kind}:{os.path.abspath(source_path)}"
     if cache_key in _PIPELINE_CACHE:
         return _PIPELINE_CACHE[cache_key]
 
     from diffusers import DiffusionPipeline
+
+    _ensure_zimage_runtime_compatibility()
 
     device, dtype = _pick_device_and_dtype()
 
@@ -424,45 +555,50 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
             local_files_only=True,
         )
     elif source_kind == "single_file":
-        if hasattr(DiffusionPipeline, "from_single_file"):
-            local_config, _ = _ensure_single_file_component_dir(flavor, checkpoint_folders, source_path)
-            pipeline = DiffusionPipeline.from_single_file(
-                source_path,
-                config=local_config,
-                torch_dtype=dtype,
-                trust_remote_code=True,
-                local_files_only=True,
-            )
-        else:
-            # Backend fallback: build local pipeline from components and inject transformer weights.
-            local_config, tried_config_only_text_encoder = _ensure_single_file_component_dir(
-                flavor, checkpoint_folders, source_path
-            )
-            try:
-                pipeline = DiffusionPipeline.from_pretrained(
-                    local_config,
+        local_config, tried_config_only_text_encoder = _ensure_single_file_component_dir(
+            flavor, checkpoint_folders, source_path
+        )
+
+        # Forge-like path: build pipeline from local component configs, then load
+        # single-file weights into transformer/text_encoder/vae.
+        try:
+            pipeline = _build_pipeline_from_single_file_components(local_config, source_path, dtype)
+        except Exception as split_build_error:
+            print(f"[Z-Image POC] Split-loader fallback due to: {split_build_error}")
+            if hasattr(DiffusionPipeline, "from_single_file"):
+                pipeline = DiffusionPipeline.from_single_file(
+                    source_path,
+                    config=local_config,
                     torch_dtype=dtype,
                     trust_remote_code=True,
                     local_files_only=True,
                 )
-            except Exception:
-                if not tried_config_only_text_encoder:
-                    raise
-                # Fallback: some backends require full text_encoder files even when AIO contains weights.
-                repo_id = _repo_for_flavor(flavor)
-                _download_repo_components(
-                    repo_id,
-                    local_config,
-                    patterns=["text_encoder/*"],
-                    missing=["text_encoder(fallback-full)"],
-                )
-                pipeline = DiffusionPipeline.from_pretrained(
-                    local_config,
-                    torch_dtype=dtype,
-                    trust_remote_code=True,
-                    local_files_only=True,
-                )
-            _load_transformer_weights_from_single_file(source_path, pipeline)
+            else:
+                try:
+                    pipeline = DiffusionPipeline.from_pretrained(
+                        local_config,
+                        torch_dtype=dtype,
+                        trust_remote_code=True,
+                        local_files_only=True,
+                    )
+                except Exception:
+                    if not tried_config_only_text_encoder:
+                        raise
+                    # Fallback: some backends require full text_encoder files even when AIO contains weights.
+                    repo_id = _repo_for_flavor(flavor)
+                    _download_repo_components(
+                        repo_id,
+                        local_config,
+                        patterns=["text_encoder/*"],
+                        missing=["text_encoder(fallback-full)"],
+                    )
+                    pipeline = DiffusionPipeline.from_pretrained(
+                        local_config,
+                        torch_dtype=dtype,
+                        trust_remote_code=True,
+                        local_files_only=True,
+                    )
+                _load_transformer_weights_from_single_file(source_path, pipeline)
     else:
         raise ValueError(f"Unsupported source kind: {source_kind}")
 
