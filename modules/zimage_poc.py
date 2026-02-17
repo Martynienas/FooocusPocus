@@ -180,6 +180,41 @@ def _find_local_repo_components(flavor: str, checkpoint_folders: list[str]) -> O
     return None
 
 
+def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) -> None:
+    from safetensors.torch import load_file
+
+    sd = load_file(single_file_path, device="cpu")
+
+    # Common AIO prefix from Forge/Comfy exports.
+    prefix = "model.diffusion_model."
+    transformer_sd = {}
+    for k, v in sd.items():
+        if k.startswith(prefix):
+            transformer_sd[k[len(prefix):]] = v
+
+    # Fallback for already-converted checkpoints.
+    if not transformer_sd and any(k.startswith("transformer.") for k in sd.keys()):
+        transformer_sd = {k[len("transformer."):]: v for k, v in sd.items() if k.startswith("transformer.")}
+
+    if not transformer_sd:
+        raise RuntimeError(
+            "Single-file Z-Image checkpoint does not contain transformer weights in expected format."
+        )
+
+    missing, unexpected = pipeline.transformer.load_state_dict(transformer_sd, strict=False)
+    # Guardrail: if mismatch is huge, fail early rather than silently generating wrong outputs.
+    if len(unexpected) > 64:
+        raise RuntimeError(
+            f"Transformer weight mismatch too large (unexpected={len(unexpected)}). "
+            "Checkpoint may be incompatible with selected Z-Image components."
+        )
+    if len(missing) > 256:
+        raise RuntimeError(
+            f"Transformer weight mismatch too large (missing={len(missing)}). "
+            "Checkpoint may be incompatible with selected Z-Image components."
+        )
+
+
 def resolve_zimage_source(name: str, checkpoint_folders: list[str], auto_download_if_missing: bool = False) -> tuple[Optional[str], Optional[str], str]:
     flavor = detect_zimage_flavor(name)
     resolved = _resolve_named_path(name, checkpoint_folders)
@@ -238,10 +273,20 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
                 local_files_only=True,
             )
         else:
-            raise RuntimeError(
-                "Single-file Z-Image is not supported by current backend. "
-                "Use a local full Z-Image model folder."
+            # Backend fallback: build local pipeline from components and inject transformer weights.
+            local_config = _find_local_repo_components(flavor, checkpoint_folders)
+            if local_config is None:
+                raise RuntimeError(
+                    "Single-file Z-Image requires local components (text_encoder/tokenizer/vae/scheduler). "
+                    "Provide a local Z-Image model folder."
+                )
+            pipeline = DiffusionPipeline.from_pretrained(
+                local_config,
+                torch_dtype=dtype,
+                trust_remote_code=True,
+                local_files_only=True,
             )
+            _load_transformer_weights_from_single_file(source_path, pipeline)
     else:
         raise ValueError(f"Unsupported source kind: {source_kind}")
 
