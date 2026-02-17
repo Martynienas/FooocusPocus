@@ -195,13 +195,37 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str):
             local_files_only=False,
         )
     elif source_kind == "single_file":
-        pipeline = DiffusionPipeline.from_single_file(
-            source_path,
-            config=_repo_for_flavor(flavor),
-            torch_dtype=dtype,
-            trust_remote_code=True,
-            local_files_only=False,
-        )
+        repo_id = _repo_for_flavor(flavor)
+        if hasattr(DiffusionPipeline, "from_single_file"):
+            pipeline = DiffusionPipeline.from_single_file(
+                source_path,
+                config=repo_id,
+                torch_dtype=dtype,
+                trust_remote_code=True,
+                local_files_only=False,
+            )
+        else:
+            try:
+                from diffusers import AutoPipelineForText2Image
+            except Exception as e:
+                raise RuntimeError(
+                    "Single-file Z-Image requires the project's pinned dependencies. "
+                    "Run: python -m pip install -r requirements_versions.txt"
+                ) from e
+
+            if not hasattr(AutoPipelineForText2Image, "from_single_file"):
+                raise RuntimeError(
+                    "Single-file Z-Image requires the project's pinned dependencies. "
+                    "Run: python -m pip install -r requirements_versions.txt"
+                )
+
+            pipeline = AutoPipelineForText2Image.from_single_file(
+                source_path,
+                config=repo_id,
+                torch_dtype=dtype,
+                trust_remote_code=True,
+                local_files_only=False,
+            )
     else:
         raise ValueError(f"Unsupported source kind: {source_kind}")
 

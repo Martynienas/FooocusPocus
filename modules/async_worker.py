@@ -956,7 +956,7 @@ def worker():
             except ModuleNotFoundError as e:
                 progressbar(async_task, 100, f'Z-Image POC requires missing dependency: {e}')
                 print('[Z-Image POC] Install required dependencies with:')
-                print('  python -m pip install "diffusers==0.30.3" "safetensors>=0.4.3"')
+                print('  python -m pip install -r requirements_versions.txt')
                 return
             except Exception as e:
                 progressbar(async_task, 100, f'Z-Image generation failed: {e}')
