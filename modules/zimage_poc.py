@@ -6,6 +6,14 @@ from typing import Optional
 _PIPELINE_CACHE = {}
 
 
+def _project_root() -> str:
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _universal_zimage_root() -> str:
+    return os.path.join(_project_root(), "models", "zimage")
+
+
 def is_zimage_checkpoint_name(name: str) -> bool:
     lowered = (name or "").lower()
     return "z-image" in lowered or "zimage" in lowered or "tongyi" in lowered
@@ -165,6 +173,18 @@ def should_use_zimage_checkpoint(name: str, checkpoint_folders: list[str]) -> bo
 
 def _find_local_repo_components(flavor: str, checkpoint_folders: list[str]) -> Optional[str]:
     repo = _repo_for_flavor(flavor).split("/")[-1]
+    universal_root = _universal_zimage_root()
+    universal_repo_dir = os.path.join(universal_root, repo)
+
+    # Preferred universal location:
+    #   models/zimage/<RepoName>/{text_encoder,tokenizer,vae,scheduler}
+    if is_zimage_model_directory(universal_repo_dir):
+        return universal_repo_dir
+    # Backward-compatible fallback:
+    #   models/zimage/{text_encoder,tokenizer,vae,scheduler}
+    if is_zimage_model_directory(universal_root):
+        return universal_root
+
     candidates = [repo, repo.lower(), repo.replace("-", "_").lower()]
 
     for folder in checkpoint_folders:
@@ -184,27 +204,30 @@ def _ensure_single_file_component_dir(flavor: str, checkpoint_folders: list[str]
     """
     Prepare a local component directory for single-file Z-Image loading.
     Policy:
-    - text_encoder + tokenizer must already exist locally (user-provided).
-    - vae + scheduler may be auto-downloaded if missing.
+    - tokenizer must already exist locally (user-provided).
+    - text_encoder + vae + scheduler may be auto-downloaded if missing.
     """
     local_config = _find_local_repo_components(flavor, checkpoint_folders)
+    repo = _repo_for_flavor(flavor).split("/")[-1]
+    universal_root = _universal_zimage_root()
+    preferred_local_config = os.path.join(universal_root, repo)
+    os.makedirs(preferred_local_config, exist_ok=True)
+
     if local_config is None:
-        raise RuntimeError(
-            "Single-file Z-Image requires local text components (text_encoder/tokenizer). "
-            "Provide a local Z-Image model folder."
-        )
+        # Use universal repo folder as canonical storage even before it is complete.
+        local_config = preferred_local_config
 
-    text_encoder_dir = os.path.join(local_config, "text_encoder")
     tokenizer_dir = os.path.join(local_config, "tokenizer")
-    if not os.path.isdir(text_encoder_dir) or not os.path.isdir(tokenizer_dir):
+    if not os.path.isdir(tokenizer_dir):
         raise RuntimeError(
-            "Single-file Z-Image requires local text components (text_encoder/tokenizer). "
-            "Provide a local Z-Image model folder."
+            "Single-file Z-Image requires local tokenizer files. "
+            f"Place tokenizer under: {preferred_local_config}/tokenizer"
         )
 
+    need_text_encoder = not os.path.isdir(os.path.join(local_config, "text_encoder"))
     need_vae = not os.path.isdir(os.path.join(local_config, "vae"))
     need_scheduler = not os.path.isdir(os.path.join(local_config, "scheduler"))
-    if not need_vae and not need_scheduler:
+    if not need_text_encoder and not need_vae and not need_scheduler:
         return local_config
 
     from huggingface_hub import snapshot_download
@@ -214,13 +237,21 @@ def _ensure_single_file_component_dir(flavor: str, checkpoint_folders: list[str]
         "model_index.json",
         "transformer/config.json",
     ]
+    if need_text_encoder:
+        patterns.append("text_encoder/*")
     if need_vae:
         patterns.append("vae/*")
     if need_scheduler:
         patterns.append("scheduler/*")
 
-    print(f"[Z-Image POC] Downloading missing components: "
-          f"{'vae ' if need_vae else ''}{'scheduler' if need_scheduler else ''}".strip())
+    missing = []
+    if need_text_encoder:
+        missing.append("text_encoder")
+    if need_vae:
+        missing.append("vae")
+    if need_scheduler:
+        missing.append("scheduler")
+    print(f"[Z-Image POC] Downloading missing components: {', '.join(missing)}")
     snapshot_download(
         repo_id=repo_id,
         local_dir=local_config,
@@ -235,16 +266,19 @@ def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) 
 
     sd = load_file(single_file_path, device="cpu")
 
-    # Common AIO prefix from Forge/Comfy exports.
-    prefix = "model.diffusion_model."
-    transformer_sd = {}
-    for k, v in sd.items():
-        if k.startswith(prefix):
-            transformer_sd[k[len(prefix):]] = v
+    def extract_prefixed(prefixes: list[str]) -> dict:
+        for pref in prefixes:
+            part = {k[len(pref):]: v for k, v in sd.items() if k.startswith(pref)}
+            if part:
+                return part
+        return {}
 
-    # Fallback for already-converted checkpoints.
-    if not transformer_sd and any(k.startswith("transformer.") for k in sd.keys()):
-        transformer_sd = {k[len("transformer."):]: v for k, v in sd.items() if k.startswith("transformer.")}
+    # Common Forge/Comfy prefixes.
+    transformer_sd = extract_prefixed([
+        "model.diffusion_model.",
+        "diffusion_model.",
+        "transformer.",
+    ])
 
     if not transformer_sd:
         raise RuntimeError(
@@ -263,6 +297,32 @@ def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) 
             f"Transformer weight mismatch too large (missing={len(missing)}). "
             "Checkpoint may be incompatible with selected Z-Image components."
         )
+
+    # Optional: if single-file includes text encoder / VAE weights, prefer them.
+    if hasattr(pipeline, "text_encoder") and pipeline.text_encoder is not None:
+        text_sd = extract_prefixed([
+            "text_encoders.qwen3_4b.",
+            "text_encoder.",
+            "qwen3_4b.",
+        ])
+        if text_sd:
+            try:
+                pipeline.text_encoder.load_state_dict(text_sd, strict=False)
+                print(f"[Z-Image POC] Loaded text_encoder weights from single-file ({len(text_sd)} tensors).")
+            except Exception as e:
+                print(f"[Z-Image POC] Skipped text_encoder weights from single-file: {e}")
+
+    if hasattr(pipeline, "vae") and pipeline.vae is not None:
+        vae_sd = extract_prefixed([
+            "vae.",
+            "first_stage_model.",
+        ])
+        if vae_sd:
+            try:
+                pipeline.vae.load_state_dict(vae_sd, strict=False)
+                print(f"[Z-Image POC] Loaded VAE weights from single-file ({len(vae_sd)} tensors).")
+            except Exception as e:
+                print(f"[Z-Image POC] Skipped VAE weights from single-file: {e}")
 
 
 def resolve_zimage_source(name: str, checkpoint_folders: list[str], auto_download_if_missing: bool = False) -> tuple[Optional[str], Optional[str], str]:
