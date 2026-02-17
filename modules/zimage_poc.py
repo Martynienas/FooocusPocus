@@ -2,6 +2,7 @@ import json
 import os
 import hashlib
 import importlib
+import gc
 from typing import Optional
 
 
@@ -30,6 +31,33 @@ def _put_prompt_cache(key: tuple, value: tuple) -> None:
     while len(_PROMPT_EMBED_CACHE) > _MAX_PROMPT_CACHE_ITEMS:
         first = next(iter(_PROMPT_EMBED_CACHE))
         _PROMPT_EMBED_CACHE.pop(first, None)
+
+
+def _cleanup_memory(cuda: bool = True) -> None:
+    gc.collect()
+    if not cuda:
+        return
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
+
+def _cuda_mem_info_gb() -> tuple[float, float]:
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return 0.0, 0.0
+        free_bytes, total_bytes = torch.cuda.mem_get_info(torch.cuda.current_device())
+        return float(free_bytes) / float(1024**3), float(total_bytes) / float(1024**3)
+    except Exception:
+        return 0.0, 0.0
 
 
 def _universal_zimage_root() -> str:
@@ -446,8 +474,31 @@ def _convert_z_image_transformer_checkpoint_to_diffusers(checkpoint: dict) -> di
     return converted
 
 
-def _transformer_match_score(state_dict: dict, model_keys: set[str]) -> int:
-    if not state_dict or not model_keys:
+def _convert_z_image_transformer_key_to_diffusers(src_key: str) -> list[str]:
+    key = src_key
+    key = key.replace("final_layer.", "all_final_layer.2-1.")
+    key = key.replace("x_embedder.", "all_x_embedder.2-1.")
+    key = key.replace(".attention.out.bias", ".attention.to_out.0.bias")
+    key = key.replace(".attention.k_norm.weight", ".attention.norm_k.weight")
+    key = key.replace(".attention.q_norm.weight", ".attention.norm_q.weight")
+    key = key.replace(".attention.out.weight", ".attention.to_out.0.weight")
+    if ".attention.qkv.weight" in key:
+        return [
+            key.replace(".attention.qkv.weight", ".attention.to_q.weight"),
+            key.replace(".attention.qkv.weight", ".attention.to_k.weight"),
+            key.replace(".attention.qkv.weight", ".attention.to_v.weight"),
+        ]
+    if ".attention.qkv.bias" in key:
+        return [
+            key.replace(".attention.qkv.bias", ".attention.to_q.bias"),
+            key.replace(".attention.qkv.bias", ".attention.to_k.bias"),
+            key.replace(".attention.qkv.bias", ".attention.to_v.bias"),
+        ]
+    return [key]
+
+
+def _transformer_match_score_from_keys(src_keys, model_keys: set[str]) -> int:
+    if not src_keys or not model_keys:
         return 0
 
     strip_prefixes = [
@@ -458,15 +509,19 @@ def _transformer_match_score(state_dict: dict, model_keys: set[str]) -> int:
     ]
 
     matched = 0
-    for src_key in state_dict.keys():
+    for src_key in src_keys:
         if src_key in model_keys:
             matched += 1
             continue
         for pref in strip_prefixes:
-            if src_key.startswith(pref) and src_key[len(pref) :] in model_keys:
+            if src_key.startswith(pref) and src_key[len(pref):] in model_keys:
                 matched += 1
                 break
     return matched
+
+
+def _transformer_match_score(state_dict: dict, model_keys: set[str]) -> int:
+    return _transformer_match_score_from_keys(state_dict.keys() if state_dict else [], model_keys)
 
 
 def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) -> None:
@@ -478,17 +533,18 @@ def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) 
     )
 
     if transformer_sd and transformer_model_keys:
-        best_sd = transformer_sd
-        base_score = _transformer_match_score(best_sd, transformer_model_keys)
+        base_score = _transformer_match_score(transformer_sd, transformer_model_keys)
         try:
-            converted_sd = _convert_z_image_transformer_checkpoint_to_diffusers(dict(transformer_sd))
-            converted_score = _transformer_match_score(converted_sd, transformer_model_keys)
+            converted_keys = []
+            for key in transformer_sd.keys():
+                converted_keys.extend(_convert_z_image_transformer_key_to_diffusers(key))
+            converted_score = _transformer_match_score_from_keys(converted_keys, transformer_model_keys)
             if converted_score > base_score:
                 print(
                     f"[Z-Image POC] Using Forge-style Z-Image transformer key mapping "
                     f"(score {base_score}->{converted_score})."
                 )
-                transformer_sd = converted_sd
+                transformer_sd = _convert_z_image_transformer_checkpoint_to_diffusers(transformer_sd)
         except Exception as e:
             print(f"[Z-Image POC] Z-Image transformer conversion skipped: {e}")
 
@@ -528,6 +584,11 @@ def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) 
                 print(f"[Z-Image POC] Loaded VAE weights from single-file ({len(vae_sd)} tensors).")
             except Exception as e:
                 print(f"[Z-Image POC] Skipped VAE weights from single-file: {e}")
+    parts["transformer"].clear()
+    parts["text_encoder"].clear()
+    parts["vae"].clear()
+    del parts
+    _cleanup_memory(cuda=False)
 
 
 def _apply_component_state_dict(
@@ -592,23 +653,34 @@ def _remap_state_dict_to_model_keys(state_dict: dict, model_keys: set[str], labe
 def _call_with_dtype_compat(callable_obj, dtype, kwargs: dict, label: str):
     errors = []
 
+    def _invoke(kwargs_try: dict):
+        try:
+            return callable_obj(**kwargs_try)
+        except TypeError as e:
+            # Some loaders reject low_cpu_mem_usage (or dtype args). Retry once without it.
+            if "low_cpu_mem_usage" in kwargs_try:
+                fallback = dict(kwargs_try)
+                fallback.pop("low_cpu_mem_usage", None)
+                return callable_obj(**fallback)
+            raise e
+
     if dtype is not None:
         try:
-            return callable_obj(**{**kwargs, "dtype": dtype})
+            return _invoke({**kwargs, "dtype": dtype})
         except TypeError as e:
             errors.append(e)
         except Exception:
             raise
 
         try:
-            return callable_obj(**{**kwargs, "torch_dtype": dtype})
+            return _invoke({**kwargs, "torch_dtype": dtype})
         except TypeError as e:
             errors.append(e)
         except Exception:
             raise
 
     try:
-        return callable_obj(**kwargs)
+        return _invoke(kwargs)
     except Exception as e:
         if errors:
             print(f"[Z-Image POC] {label} dtype-compat fallback after: {errors[-1]}")
@@ -665,14 +737,22 @@ def _build_pipeline_from_single_file_components(
                 model = _call_with_dtype_compat(
                     cls.from_pretrained,
                     dtype,
-                    {"pretrained_model_name_or_path": comp_path, "local_files_only": True},
+                    {
+                        "pretrained_model_name_or_path": comp_path,
+                        "local_files_only": True,
+                        "low_cpu_mem_usage": True,
+                    },
                     f"{component_name}.from_pretrained",
                 )
         else:
             model = _call_with_dtype_compat(
                 cls.from_pretrained,
                 dtype,
-                {"pretrained_model_name_or_path": comp_path, "local_files_only": True},
+                {
+                    "pretrained_model_name_or_path": comp_path,
+                    "local_files_only": True,
+                    "low_cpu_mem_usage": True,
+                },
                 f"{component_name}.from_pretrained",
             )
 
@@ -690,14 +770,16 @@ def _build_pipeline_from_single_file_components(
     if raw_transformer_sd and transformer_model_keys:
         base_score = _transformer_match_score(raw_transformer_sd, transformer_model_keys)
         try:
-            converted_transformer_sd = _convert_z_image_transformer_checkpoint_to_diffusers(dict(raw_transformer_sd))
-            converted_score = _transformer_match_score(converted_transformer_sd, transformer_model_keys)
+            converted_keys = []
+            for key in raw_transformer_sd.keys():
+                converted_keys.extend(_convert_z_image_transformer_key_to_diffusers(key))
+            converted_score = _transformer_match_score_from_keys(converted_keys, transformer_model_keys)
             if converted_score > base_score:
                 print(
                     f"[Z-Image POC] Using Forge-style Z-Image transformer key mapping "
                     f"(score {base_score}->{converted_score})."
                 )
-                selected_transformer_sd = converted_transformer_sd
+                selected_transformer_sd = _convert_z_image_transformer_checkpoint_to_diffusers(raw_transformer_sd)
         except Exception as e:
             print(f"[Z-Image POC] Z-Image transformer conversion skipped: {e}")
 
@@ -722,7 +804,11 @@ def _build_pipeline_from_single_file_components(
     if isinstance(pipeline, DiffusionPipeline):
         pipeline.set_progress_bar_config(disable=True)
 
+    parts["transformer"].clear()
+    parts["text_encoder"].clear()
+    parts["vae"].clear()
     del parts
+    _cleanup_memory(cuda=False)
     return pipeline
 
 
@@ -948,7 +1034,11 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
         pipeline = _call_with_dtype_compat(
             DiffusionPipeline.from_pretrained,
             dtype,
-            {"pretrained_model_name_or_path": source_path, "local_files_only": True},
+            {
+                "pretrained_model_name_or_path": source_path,
+                "local_files_only": True,
+                "low_cpu_mem_usage": True,
+            },
             "DiffusionPipeline.from_pretrained(directory)",
         )
     elif source_kind == "single_file":
@@ -959,30 +1049,30 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
         split_error = None
         native_error = None
         pipeline = None
+        is_fp8_single_file = _is_likely_fp8_single_file(source_path)
 
         # Forge-like priority: let the framework load the single-file checkpoint natively first.
         try:
-            if hasattr(DiffusionPipeline, "from_single_file"):
+            if hasattr(DiffusionPipeline, "from_single_file") and not is_fp8_single_file:
                 native_kwargs = dict(
                     config=local_config,
                     local_files_only=True,
                     low_cpu_mem_usage=True,
                 )
-                if not _is_likely_fp8_single_file(source_path):
-                    pipeline = _call_with_dtype_compat(
-                        lambda **kwargs: DiffusionPipeline.from_single_file(source_path, **kwargs),
-                        dtype,
-                        native_kwargs,
-                        "DiffusionPipeline.from_single_file",
-                    )
-                else:
-                    print("[Z-Image POC] FP8 checkpoint detected, preferring native single-file loader.")
-                    pipeline = DiffusionPipeline.from_single_file(source_path, **native_kwargs)
+                pipeline = _call_with_dtype_compat(
+                    lambda **kwargs: DiffusionPipeline.from_single_file(source_path, **kwargs),
+                    dtype,
+                    native_kwargs,
+                    "DiffusionPipeline.from_single_file",
+                )
                 if pipeline is not None and _pipeline_has_meta_tensors(pipeline):
                     raise RuntimeError("native single-file produced meta tensors")
+            elif is_fp8_single_file:
+                print("[Z-Image POC] FP8 checkpoint detected, skipping native single-file loader to reduce RAM spikes.")
         except Exception as e:
             native_error = e
             print(f"[Z-Image POC] Native single-file loader fallback due to: {e}")
+            _cleanup_memory(cuda=True)
 
         # Fallback: split-loader assembly.
         if pipeline is None:
@@ -998,6 +1088,7 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
             except Exception as e:
                 split_error = e
                 print(f"[Z-Image POC] Split-loader fallback due to: {e}")
+                _cleanup_memory(cuda=True)
 
         if pipeline is None and split_error is not None:
             # Legacy fallback path.
@@ -1005,7 +1096,11 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
                 pipeline = _call_with_dtype_compat(
                     DiffusionPipeline.from_pretrained,
                     dtype,
-                    {"pretrained_model_name_or_path": local_config, "local_files_only": True},
+                    {
+                        "pretrained_model_name_or_path": local_config,
+                        "local_files_only": True,
+                        "low_cpu_mem_usage": True,
+                    },
                     "DiffusionPipeline.from_pretrained(local_config)",
                 )
             except Exception:
@@ -1023,7 +1118,11 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
                     pipeline = _call_with_dtype_compat(
                         DiffusionPipeline.from_pretrained,
                         dtype,
-                        {"pretrained_model_name_or_path": local_config, "local_files_only": True},
+                        {
+                            "pretrained_model_name_or_path": local_config,
+                            "local_files_only": True,
+                            "low_cpu_mem_usage": True,
+                        },
                         "DiffusionPipeline.from_pretrained(local_config-fallback)",
                     )
                 except Exception:
@@ -1088,7 +1187,7 @@ def generate_zimage(
     cache_key = f"{source_kind}:{os.path.abspath(source_path)}"
     pipeline, generator_device, used_offload = _load_pipeline(source_kind, source_path, flavor, checkpoint_folders)
     if generator_device == "cuda":
-        torch.cuda.empty_cache()
+        _cleanup_memory(cuda=True)
     generator = torch.Generator(device=generator_device).manual_seed(seed)
 
     # Align scheduler shift with Forge-style "Shift" control when available.
@@ -1105,6 +1204,22 @@ def generate_zimage(
     forced_max_seq = getattr(pipeline, "_zimage_forced_max_sequence_length", None)
     if forced_max_seq is not None:
         max_sequence_length = min(max_sequence_length, int(forced_max_seq))
+    if generator_device == "cuda":
+        free_gb, total_gb = _cuda_mem_info_gb()
+        if max_sequence_length > 192 and free_gb > 0 and free_gb < 0.40:
+            max_sequence_length = 192
+            pipeline._zimage_forced_max_sequence_length = 192
+            print(
+                f"[Z-Image POC] Low free VRAM before generation ({free_gb:.2f}GB/{total_gb:.2f}GB), "
+                "using max_sequence_length=192."
+            )
+        if max_sequence_length > 160 and free_gb > 0 and free_gb < 0.25:
+            max_sequence_length = 160
+            pipeline._zimage_forced_max_sequence_length = 160
+            print(
+                f"[Z-Image POC] Very low free VRAM before generation ({free_gb:.2f}GB/{total_gb:.2f}GB), "
+                "using max_sequence_length=160."
+            )
 
     use_cfg = guidance_scale > 1.0
     neg_key = negative_prompt if use_cfg else ""
@@ -1162,41 +1277,68 @@ def generate_zimage(
         f"max_seq={max_sequence_length}, offload={used_offload}"
     )
 
+    output = None
     try:
-        try:
-            output = _run_pipeline_call(pipeline, call_kwargs)
-        except RuntimeError as e:
-            msg = str(e).lower()
-            if "out of memory" not in msg or generator_device != "cuda":
-                raise
+        retry_caps = []
+        if flavor == "turbo":
+            current_seq = int(call_kwargs.get("max_sequence_length", 256))
+            for candidate in (192, 160, 128):
+                if current_seq > candidate:
+                    retry_caps.append(candidate)
 
-            print("[Z-Image POC] CUDA OOM detected, retrying with stricter offload mode.")
-            torch.cuda.empty_cache()
-            if hasattr(pipeline, "enable_sequential_cpu_offload"):
-                pipeline.enable_sequential_cpu_offload()
-                pipeline._zimage_memory_mode = "sequential_offload"
-                used_offload = True
-            if hasattr(pipeline, "enable_attention_slicing"):
-                pipeline.enable_attention_slicing("max")
-            if hasattr(pipeline, "enable_vae_slicing"):
-                pipeline.enable_vae_slicing()
-            if hasattr(pipeline, "enable_vae_tiling"):
-                pipeline.enable_vae_tiling()
-            if flavor == "turbo" and call_kwargs.get("max_sequence_length", 0) > 192:
-                call_kwargs["max_sequence_length"] = 192
-                pipeline._zimage_forced_max_sequence_length = 192
-                print("[Z-Image POC] Retrying with reduced max_sequence_length=192 for lower VRAM usage.")
-            output = _run_pipeline_call(pipeline, call_kwargs)
+        for attempt in range(3):
+            try:
+                output = _run_pipeline_call(pipeline, call_kwargs)
+                break
+            except RuntimeError as e:
+                msg = str(e).lower()
+                if "out of memory" not in msg or generator_device != "cuda":
+                    raise
+                if attempt >= 2:
+                    raise
+
+                print("[Z-Image POC] CUDA OOM detected, retrying with stricter offload mode.")
+                _cleanup_memory(cuda=True)
+
+                if hasattr(pipeline, "enable_sequential_cpu_offload"):
+                    pipeline.enable_sequential_cpu_offload()
+                    pipeline._zimage_memory_mode = "sequential_offload"
+                    used_offload = True
+                if hasattr(pipeline, "enable_attention_slicing"):
+                    pipeline.enable_attention_slicing("max")
+                if hasattr(pipeline, "enable_vae_slicing"):
+                    pipeline.enable_vae_slicing()
+                if hasattr(pipeline, "enable_vae_tiling"):
+                    pipeline.enable_vae_tiling()
+
+                if retry_caps:
+                    next_cap = retry_caps.pop(0)
+                    call_kwargs["max_sequence_length"] = next_cap
+                    pipeline._zimage_forced_max_sequence_length = next_cap
+                    print(
+                        f"[Z-Image POC] Retrying with reduced max_sequence_length={next_cap} for lower VRAM usage."
+                    )
+                else:
+                    print("[Z-Image POC] Retrying with same sequence length after memory cleanup.")
+                continue
+
+        if output is None:
+            raise RuntimeError("Z-Image generation failed after OOM retries.")
 
         image = output.images[0]
         del output
-        if generator_device == "cuda":
-            torch.cuda.empty_cache()
         return image
     except Exception:
         # Prevent poisoned/corrupted cache from breaking next generation request.
         _PIPELINE_CACHE.pop(cache_key, None)
         _clear_prompt_cache_for_pipeline(cache_key)
-        if generator_device == "cuda":
-            torch.cuda.empty_cache()
         raise
+    finally:
+        try:
+            del prompt_embeds
+            del negative_prompt_embeds
+            del generator
+            call_kwargs.clear()
+        except Exception:
+            pass
+        _cleanup_memory(cuda=(generator_device == "cuda"))
