@@ -955,7 +955,8 @@ def worker():
                 np_image = np.array(pil_image)
             except ModuleNotFoundError as e:
                 progressbar(async_task, 100, f'Z-Image POC requires missing dependency: {e}')
-                print('[Z-Image POC] Install required dependencies (diffusers/safetensors/torch).')
+                print('[Z-Image POC] Install required dependencies with:')
+                print('  python -m pip install "diffusers==0.30.3" "safetensors>=0.4.3"')
                 return
             except Exception as e:
                 progressbar(async_task, 100, f'Z-Image generation failed: {e}')
