@@ -73,7 +73,7 @@ def _zimage_perf_profile() -> str:
 
 
 def _zimage_xformers_mode() -> str:
-    value = os.environ.get("FOOOCUS_ZIMAGE_XFORMERS", "auto").strip().lower()
+    value = os.environ.get("FOOOCUS_ZIMAGE_XFORMERS", "on").strip().lower()
     if value in ("1", "true", "yes", "on", "force"):
         return "on"
     if value in ("0", "false", "no", "off", "disable"):
