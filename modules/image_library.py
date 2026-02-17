@@ -292,16 +292,21 @@ class ImageLibrary:
         """
         Delete an image file.
         """
+        print(f"[ImageLibrary] delete_image called with: {filepath}")
         try:
             if os.path.exists(filepath):
+                print(f"[ImageLibrary] File exists, removing: {filepath}")
                 os.remove(filepath)
                 # Invalidate cache
                 self._cache = None
                 self._tag_index = {}
+                print(f"[ImageLibrary] Successfully deleted: {filepath}")
                 return True
+            else:
+                print(f"[ImageLibrary] File does not exist: {filepath}")
             return False
         except Exception as e:
-            print(f"Error deleting {filepath}: {e}")
+            print(f"[ImageLibrary] Error deleting {filepath}: {e}")
             return False
     
     def get_image_count(self) -> int:

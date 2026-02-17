@@ -1825,23 +1825,31 @@ with shared.gradio_root:
         
         def library_delete_image(image_path):
             """Delete the selected image."""
+            print(f"[Library] Delete requested for: {image_path}")
+            
             if not image_path:
+                print("[Library] No image path provided")
                 return gr.update(), gr.update(), None
             
             from modules.image_library import ImageLibrary
             lib = ImageLibrary()
+            
+            print(f"[Library] Attempting to delete: {image_path}")
             success = lib.delete_image(image_path)
+            print(f"[Library] Delete result: {success}")
             
             if success:
                 # Refresh gallery
                 lib.clear_cache()
                 images = lib.scan_images()
                 gallery_images = [[img['path'], img.get('filename', '')] for img in images]
+                print(f"[Library] Gallery refreshed with {len(gallery_images)} images")
                 return (
                     gr.update(value=gallery_images),
                     gr.update(value=None),
                     None
                 )
+            print(f"[Library] Delete failed for: {image_path}")
             return gr.update(), gr.update(), image_path
         
         # Modal open/close handlers
