@@ -185,6 +185,27 @@ def _single_file_has_text_encoder_weights(path: str) -> bool:
     return False
 
 
+def _is_likely_fp8_single_file(path: str) -> bool:
+    if not os.path.isfile(path) or not path.lower().endswith(".safetensors"):
+        return False
+    name = os.path.basename(path).lower()
+    if "fp8" in name:
+        return True
+    try:
+        from safetensors import safe_open
+
+        with safe_open(path, framework="pt", device="cpu") as f:
+            keys = set(f.keys())
+            if "scaled_fp8" in keys or "transformer.scaled_fp8" in keys:
+                return True
+            # Common quantized-sidecar naming patterns.
+            if any(k.endswith(".scale") or ".fp8_" in k for k in keys):
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def should_use_zimage_checkpoint(name: str, checkpoint_folders: list[str]) -> bool:
     if is_zimage_checkpoint_name(name):
         return True
@@ -725,7 +746,7 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
     if source_kind == "directory":
         pipeline = DiffusionPipeline.from_pretrained(
             source_path,
-            torch_dtype=dtype,
+            dtype=dtype,
             trust_remote_code=True,
             local_files_only=True,
         )
@@ -738,12 +759,24 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
         # weights (which may not exist and can cause long delays).
         split_error = None
         try:
-            pipeline = _build_pipeline_from_single_file_components(
-                local_config,
-                source_path,
-                dtype,
-                prefer_single_file_aux_weights=prefer_single_file_aux_weights,
-            )
+            prefer_native_fp8 = _is_likely_fp8_single_file(source_path)
+            if prefer_native_fp8 and hasattr(DiffusionPipeline, "from_single_file"):
+                native_kwargs = dict(
+                    config=local_config,
+                    trust_remote_code=True,
+                    local_files_only=True,
+                    low_cpu_mem_usage=True,
+                )
+                # For fp8 keep default dtype behavior to avoid accidental upcast.
+                print("[Z-Image POC] FP8 checkpoint detected, preferring native single-file loader.")
+                pipeline = DiffusionPipeline.from_single_file(source_path, **native_kwargs)
+            else:
+                pipeline = _build_pipeline_from_single_file_components(
+                    local_config,
+                    source_path,
+                    dtype,
+                    prefer_single_file_aux_weights=prefer_single_file_aux_weights,
+                )
         except Exception as e:
             split_error = e
             print(f"[Z-Image POC] Split-loader fallback due to: {e}")
@@ -761,7 +794,7 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
                 )
                 # Avoid forced upcast for fp8 checkpoints.
                 if "fp8" not in os.path.basename(source_path).lower():
-                    single_file_kwargs["torch_dtype"] = dtype
+                    single_file_kwargs["dtype"] = dtype
                 pipeline = DiffusionPipeline.from_single_file(
                     source_path,
                     **single_file_kwargs,
@@ -775,7 +808,7 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
             try:
                 pipeline = DiffusionPipeline.from_pretrained(
                     local_config,
-                    torch_dtype=dtype,
+                    dtype=dtype,
                     trust_remote_code=True,
                     local_files_only=True,
                 )
@@ -793,7 +826,7 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
                 try:
                     pipeline = DiffusionPipeline.from_pretrained(
                         local_config,
-                        torch_dtype=dtype,
+                        dtype=dtype,
                         trust_remote_code=True,
                         local_files_only=True,
                     )
