@@ -61,6 +61,67 @@ def _cuda_mem_info_gb() -> tuple[float, float]:
         return 0.0, 0.0
 
 
+def _truthy_env(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _round_up_to_supported_seq(value: int, max_cap: int) -> int:
+    buckets = [32, 64, 96, 128, 160, 192, 256, 384, 512]
+    cap = max(32, int(max_cap))
+    for bucket in buckets:
+        if bucket >= value and bucket <= cap:
+            return bucket
+    return cap
+
+
+def _estimate_prompt_token_count(pipeline, text: str) -> int:
+    tokenizer = getattr(pipeline, "tokenizer", None)
+    if tokenizer is not None:
+        try:
+            encoded = tokenizer(
+                text or "",
+                add_special_tokens=True,
+                truncation=False,
+                return_attention_mask=False,
+                return_tensors=None,
+            )
+            ids = encoded.get("input_ids", []) if isinstance(encoded, dict) else []
+            if ids and isinstance(ids[0], list):
+                ids = ids[0]
+            if isinstance(ids, list):
+                return max(1, len(ids))
+        except Exception:
+            pass
+    # Fallback heuristic if tokenizer is not available.
+    words = len((text or "").strip().split())
+    return max(1, int(words * 1.6) + 4)
+
+
+def _compute_auto_max_sequence_length(
+    pipeline,
+    prompt: str,
+    negative_prompt: str,
+    use_cfg: bool,
+    hard_cap: int,
+) -> int:
+    pos_tokens = _estimate_prompt_token_count(pipeline, prompt)
+    pos_need = max(64, pos_tokens + 24)
+
+    neg_tokens = 0
+    neg_need = 32
+    if use_cfg:
+        neg_tokens = _estimate_prompt_token_count(pipeline, negative_prompt)
+        neg_need = max(32, neg_tokens + 8)
+
+    target = max(pos_need, neg_need if use_cfg else 0)
+    chosen = _round_up_to_supported_seq(target, hard_cap)
+    print(
+        f"[Z-Image POC] Auto max_seq from tokens: pos={pos_tokens}, neg={neg_tokens}, "
+        f"use_cfg={use_cfg} -> {chosen} (cap={hard_cap})"
+    )
+    return chosen
+
+
 def _universal_zimage_root() -> str:
     return os.path.join(_project_root(), "models", "zimage")
 
@@ -1225,17 +1286,31 @@ def generate_zimage(
         pass
 
     max_sequence_length = 256 if flavor == "turbo" else 512
+    use_cfg = guidance_scale > 1.0
+
+    hard_cap = max_sequence_length
     if flavor == "turbo":
         env_max_seq = os.environ.get("FOOOCUS_ZIMAGE_TURBO_MAX_SEQ", "").strip()
         if env_max_seq:
             try:
                 env_cap = max(64, int(env_max_seq))
-                max_sequence_length = min(max_sequence_length, env_cap)
+                hard_cap = min(hard_cap, env_cap)
             except Exception:
                 pass
     forced_max_seq = getattr(pipeline, "_zimage_forced_max_sequence_length", None)
     if forced_max_seq is not None:
-        max_sequence_length = min(max_sequence_length, int(forced_max_seq))
+        hard_cap = min(hard_cap, int(forced_max_seq))
+
+    max_sequence_length = hard_cap
+    if flavor == "turbo" and _truthy_env("FOOOCUS_ZIMAGE_DYNAMIC_MAX_SEQ", "1"):
+        max_sequence_length = _compute_auto_max_sequence_length(
+            pipeline=pipeline,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            use_cfg=use_cfg,
+            hard_cap=hard_cap,
+        )
+
     if generator_device == "cuda":
         free_gb, total_gb = _cuda_mem_info_gb()
         if max_sequence_length > 192 and free_gb > 0 and free_gb < 0.40:
@@ -1253,7 +1328,6 @@ def generate_zimage(
                 "using max_sequence_length=160."
             )
 
-    use_cfg = guidance_scale > 1.0
     neg_key = negative_prompt if use_cfg else ""
     embed_cache_key = (
         cache_key,
