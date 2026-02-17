@@ -1231,6 +1231,17 @@ def _is_zimage_pipeline(pipeline) -> bool:
 
 def _disable_xformers_for_pipeline(pipeline, reason: str = "") -> bool:
     changed = False
+    if _is_zimage_pipeline(pipeline):
+        transformer = getattr(pipeline, "transformer", None)
+        if transformer is not None:
+            try:
+                if hasattr(transformer, "reset_attention_backend"):
+                    transformer.reset_attention_backend()
+                elif hasattr(transformer, "set_attention_backend"):
+                    transformer.set_attention_backend("native")
+                changed = True
+            except Exception:
+                pass
     if hasattr(pipeline, "disable_xformers_memory_efficient_attention"):
         try:
             pipeline.disable_xformers_memory_efficient_attention()
@@ -1238,6 +1249,7 @@ def _disable_xformers_for_pipeline(pipeline, reason: str = "") -> bool:
         except Exception:
             pass
     pipeline._zimage_xformers_enabled = False
+    pipeline._zimage_xformers_strategy = None
     if changed:
         suffix = f" ({reason})" if reason else ""
         print(f"[Z-Image POC] Disabled xFormers attention{suffix}.")
@@ -1248,39 +1260,56 @@ def _maybe_enable_xformers(pipeline, profile: str) -> None:
     mode = _zimage_xformers_mode()
     if mode == "off":
         pipeline._zimage_xformers_enabled = False
+        pipeline._zimage_xformers_strategy = None
         return
     if mode == "auto" and profile not in ("balanced", "speed"):
         pipeline._zimage_xformers_enabled = False
+        pipeline._zimage_xformers_strategy = None
         return
     if getattr(pipeline, "_zimage_xformers_attempted", False):
         return
     pipeline._zimage_xformers_attempted = True
 
-    # Current Z-Image pipeline passes cross_attention_kwargs (freqs_cis)
-    # that xFormers attention processors do not handle correctly.
-    if _is_zimage_pipeline(pipeline) and not _truthy_env("FOOOCUS_ZIMAGE_XFORMERS_ALLOW_UNSAFE", "0"):
+    if _is_zimage_pipeline(pipeline):
+        transformer = getattr(pipeline, "transformer", None)
+        if transformer is not None and hasattr(transformer, "set_attention_backend"):
+            try:
+                transformer.set_attention_backend("xformers")
+                pipeline._zimage_xformers_enabled = True
+                pipeline._zimage_xformers_strategy = "dispatch_backend"
+                print(f"[Z-Image POC] Enabled xFormers attention backend for Z-Image (mode={mode}).")
+                return
+            except Exception as e:
+                pipeline._zimage_xformers_enabled = False
+                pipeline._zimage_xformers_strategy = None
+                if mode == "on":
+                    print(f"[Z-Image POC] Failed to enable Z-Image xFormers backend: {e}")
+                return
+
         pipeline._zimage_xformers_enabled = False
+        pipeline._zimage_xformers_strategy = None
         if mode == "on":
             print(
-                "[Z-Image POC] xFormers requested but disabled for Z-Image due known freqs_cis incompatibility. "
-                "Set FOOOCUS_ZIMAGE_XFORMERS_ALLOW_UNSAFE=1 to force."
+                "[Z-Image POC] xFormers requested but this Z-Image backend lacks "
+                "transformer.set_attention_backend(); using native attention."
             )
-        elif mode == "auto":
-            print("[Z-Image POC] Skipping xFormers for Z-Image pipeline (known freqs_cis incompatibility).")
         return
 
     if not hasattr(pipeline, "enable_xformers_memory_efficient_attention"):
         if mode == "on":
             print("[Z-Image POC] xFormers requested but pipeline does not expose xFormers attention API.")
         pipeline._zimage_xformers_enabled = False
+        pipeline._zimage_xformers_strategy = None
         return
 
     try:
         pipeline.enable_xformers_memory_efficient_attention()
         pipeline._zimage_xformers_enabled = True
+        pipeline._zimage_xformers_strategy = "processor_swap"
         print(f"[Z-Image POC] Enabled xFormers memory efficient attention (mode={mode}).")
     except Exception as e:
         pipeline._zimage_xformers_enabled = False
+        pipeline._zimage_xformers_strategy = None
         if mode == "on":
             print(f"[Z-Image POC] Failed to enable xFormers attention: {e}")
 
