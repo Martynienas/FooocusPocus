@@ -277,6 +277,48 @@ var libraryGalleryObserver = null;
 var observedLibraryGallery = null;
 var libraryBootstrapTimer = null;
 
+function getGradioInputElement(elemId) {
+    const root = document.getElementById(elemId);
+    if (!root) return null;
+    if (root.tagName === 'INPUT' || root.tagName === 'TEXTAREA') return root;
+    return root.querySelector('textarea, input');
+}
+
+function getGradioButtonElement(elemId) {
+    const root = document.getElementById(elemId);
+    if (!root) return null;
+    if (root.tagName === 'BUTTON') return root;
+    return root.querySelector('button');
+}
+
+function setNativeValue(input, value) {
+    if (!input) return;
+    const prototype = Object.getPrototypeOf(input);
+    const descriptor = prototype ? Object.getOwnPropertyDescriptor(prototype, 'value') : null;
+    if (descriptor && typeof descriptor.set === 'function') {
+        descriptor.set.call(input, value);
+    } else {
+        input.value = value;
+    }
+}
+
+function setNativeChecked(input, checked) {
+    if (!input) return;
+    const prototype = Object.getPrototypeOf(input);
+    const descriptor = prototype ? Object.getOwnPropertyDescriptor(prototype, 'checked') : null;
+    if (descriptor && typeof descriptor.set === 'function') {
+        descriptor.set.call(input, checked);
+    } else {
+        input.checked = checked;
+    }
+}
+
+function triggerInputEvents(input) {
+    if (!input) return;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
 function normalizeLibraryPath(value) {
     if (!value) return '';
     let normalized = String(value).trim();
@@ -387,6 +429,7 @@ function setupGalleryHandlers() {
     thumbnails.forEach(function(thumb, index) {
         thumb.dataset.imageIndex = index;
         const pathData = libraryImagePaths[index] || '';
+        thumb.dataset.pathData = pathData;
         const imageKey = parsePathData(pathData).key;
         
         // Add checkbox element if not already present
@@ -404,19 +447,23 @@ function setupGalleryHandlers() {
                 e.stopImmediatePropagation();
 
                 const currentIndex = Number(thumb.dataset.imageIndex);
-                const currentPathData = Number.isInteger(currentIndex) && currentIndex >= 0 ? (libraryImagePaths[currentIndex] || '') : '';
+                const currentPathData = thumb.dataset.pathData || (
+                    Number.isInteger(currentIndex) && currentIndex >= 0 ? (libraryImagePaths[currentIndex] || '') : ''
+                );
                 const currentImageKey = parsePathData(currentPathData).key;
                 toggleThumbnailSelection(thumb, currentImageKey);
                 
                 // Communicate with Python via hidden inputs
-                const pathInput = document.getElementById('library_checkbox_path');
-                const selectedInput = document.getElementById('library_checkbox_selected');
-                const triggerBtn = document.getElementById('library_checkbox_trigger');
+                const pathInput = getGradioInputElement('library_checkbox_path');
+                const selectedInput = getGradioInputElement('library_checkbox_selected');
+                const triggerBtn = getGradioButtonElement('library_checkbox_trigger');
                 
                 if (pathInput && selectedInput && triggerBtn) {
                     // Update hidden inputs
-                    pathInput.value = currentPathData;
-                    selectedInput.checked = thumb.classList.contains('selected');
+                    setNativeValue(pathInput, currentPathData);
+                    triggerInputEvents(pathInput);
+                    setNativeChecked(selectedInput, thumb.classList.contains('selected'));
+                    triggerInputEvents(selectedInput);
                     
                     // Trigger the hidden button to send data to Python
                     triggerBtn.click();
