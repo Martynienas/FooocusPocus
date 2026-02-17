@@ -327,21 +327,40 @@ def _extract_prefixed_state_dict(sd: dict, prefixes: list[str]) -> dict:
 
 
 def _split_single_file_state_dict(single_file_path: str) -> dict[str, dict]:
-    from safetensors.torch import load_file
+    from safetensors import safe_open
 
-    sd = load_file(single_file_path, device="cpu")
-    transformer_sd = _extract_prefixed_state_dict(
-        sd,
-        ["model.diffusion_model.", "diffusion_model.", "transformer."],
-    )
-    text_sd = _extract_prefixed_state_dict(
-        sd,
-        ["text_encoders.qwen3_4b.", "text_encoder.", "qwen3_4b.transformer.", "qwen3_4b."],
-    )
-    vae_sd = _extract_prefixed_state_dict(
-        sd,
-        ["vae.", "first_stage_model."],
-    )
+    transformer_prefixes = ["model.diffusion_model.", "diffusion_model.", "transformer."]
+    text_prefixes = ["text_encoders.qwen3_4b.", "text_encoder.", "qwen3_4b.transformer.", "qwen3_4b."]
+    vae_prefixes = ["vae.", "first_stage_model."]
+
+    transformer_sd = {}
+    text_sd = {}
+    vae_sd = {}
+
+    with safe_open(single_file_path, framework="pt", device="cpu") as f:
+        for key in f.keys():
+            hit = False
+            for pref in transformer_prefixes:
+                if key.startswith(pref):
+                    transformer_sd[key[len(pref):]] = f.get_tensor(key)
+                    hit = True
+                    break
+            if hit:
+                continue
+
+            for pref in text_prefixes:
+                if key.startswith(pref):
+                    text_sd[key[len(pref):]] = f.get_tensor(key)
+                    hit = True
+                    break
+            if hit:
+                continue
+
+            for pref in vae_prefixes:
+                if key.startswith(pref):
+                    vae_sd[key[len(pref):]] = f.get_tensor(key)
+                    break
+
     return {
         "transformer": transformer_sd,
         "text_encoder": text_sd,
@@ -471,6 +490,7 @@ def _build_pipeline_from_single_file_components(local_config: str, single_file_p
     if isinstance(pipeline, DiffusionPipeline):
         pipeline.set_progress_bar_config(disable=True)
 
+    del parts
     return pipeline
 
 
@@ -559,21 +579,34 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
             flavor, checkpoint_folders, source_path
         )
 
-        # Forge-like path: build pipeline from local component configs, then load
-        # single-file weights into transformer/text_encoder/vae.
-        try:
-            pipeline = _build_pipeline_from_single_file_components(local_config, source_path, dtype)
-        except Exception as split_build_error:
-            print(f"[Z-Image POC] Split-loader fallback due to: {split_build_error}")
-            if hasattr(DiffusionPipeline, "from_single_file"):
-                pipeline = DiffusionPipeline.from_single_file(
-                    source_path,
+        # Prefer native single-file loader first for lower CPU RAM peak.
+        native_error = None
+        if hasattr(DiffusionPipeline, "from_single_file"):
+            try:
+                single_file_kwargs = dict(
                     config=local_config,
-                    torch_dtype=dtype,
                     trust_remote_code=True,
                     local_files_only=True,
+                    low_cpu_mem_usage=True,
                 )
-            else:
+                # Avoid forced upcast for fp8 checkpoints.
+                if "fp8" not in os.path.basename(source_path).lower():
+                    single_file_kwargs["torch_dtype"] = dtype
+                pipeline = DiffusionPipeline.from_single_file(
+                    source_path,
+                    **single_file_kwargs,
+                )
+            except Exception as e:
+                native_error = e
+                print(f"[Z-Image POC] Native single-file loader fallback due to: {e}")
+
+        if native_error is not None or not hasattr(DiffusionPipeline, "from_single_file"):
+            # Forge-like fallback: build from local component configs and load
+            # single-file weights into transformer/text_encoder/vae.
+            try:
+                pipeline = _build_pipeline_from_single_file_components(local_config, source_path, dtype)
+            except Exception as split_build_error:
+                print(f"[Z-Image POC] Split-loader fallback due to: {split_build_error}")
                 try:
                     pipeline = DiffusionPipeline.from_pretrained(
                         local_config,
