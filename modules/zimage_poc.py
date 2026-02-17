@@ -448,6 +448,45 @@ def _apply_component_state_dict(
     print(f"[Z-Image POC] Loaded {label} from single-file ({len(state_dict)} tensors).")
 
 
+def _remap_state_dict_to_model_keys(state_dict: dict, model_keys: set[str], label: str) -> dict:
+    if not state_dict:
+        return state_dict
+
+    strip_prefixes = [
+        "",
+        "model.diffusion_model.",
+        "diffusion_model.",
+        "transformer.",
+        "model.",
+    ]
+
+    remapped = {}
+    matched = 0
+    for src_key, value in state_dict.items():
+        dst_key = None
+        if src_key in model_keys:
+            dst_key = src_key
+        else:
+            for pref in strip_prefixes[1:]:
+                if src_key.startswith(pref):
+                    cand = src_key[len(pref):]
+                    if cand in model_keys:
+                        dst_key = cand
+                        break
+
+        if dst_key is not None:
+            remapped[dst_key] = value
+            matched += 1
+        else:
+            remapped[src_key] = value
+
+    total = max(len(state_dict), 1)
+    ratio = matched / float(total)
+    if matched != len(state_dict):
+        print(f"[Z-Image POC] {label} remap coverage: matched={matched}/{len(state_dict)} ({ratio:.2%})")
+    return remapped
+
+
 def _build_pipeline_from_single_file_components(
     local_config: str,
     single_file_path: str,
@@ -506,9 +545,13 @@ def _build_pipeline_from_single_file_components(
 
     pipeline = pipeline_cls(**components)
 
+    transformer_component = getattr(pipeline, "transformer", None)
+    transformer_model_keys = set(transformer_component.state_dict().keys()) if transformer_component is not None else set()
+    remapped_transformer_sd = _remap_state_dict_to_model_keys(parts["transformer"], transformer_model_keys, "transformer")
+
     _apply_component_state_dict(
-        getattr(pipeline, "transformer", None),
-        parts["transformer"],
+        transformer_component,
+        remapped_transformer_sd,
         label="transformer",
         missing_limit=None,
         unexpected_limit=None,
@@ -599,18 +642,15 @@ def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
 
         pressure = (free_vram_gb / total_vram_gb) if total_vram_gb > 0 else 0.0
 
-        if hasattr(pipeline, "enable_sequential_cpu_offload") and (
-            (total_vram_gb > 0 and total_vram_gb <= 10.0) or pressure < 0.30
-        ):
+        # Decide by real-time pressure first; avoid forcing offload on otherwise free GPUs.
+        if hasattr(pipeline, "enable_sequential_cpu_offload") and pressure < 0.15:
             pipeline.enable_sequential_cpu_offload()
             used_offload = True
             print(
                 f"[Z-Image POC] Using sequential CPU offload "
                 f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f})."
             )
-        elif hasattr(pipeline, "enable_model_cpu_offload") and (
-            (total_vram_gb > 0 and total_vram_gb <= 18.0) or pressure < 0.55
-        ):
+        elif hasattr(pipeline, "enable_model_cpu_offload") and pressure < 0.35:
             pipeline.enable_model_cpu_offload()
             used_offload = True
             print(
@@ -842,6 +882,10 @@ def generate_zimage(
     )
     if negative_prompt and guidance_scale > 1.0:
         call_kwargs["negative_prompt"] = negative_prompt
+    print(
+        f"[Z-Image POC] Runtime params: steps={steps}, guidance={guidance_scale}, shift={shift}, "
+        f"max_seq={max_sequence_length}, offload={used_offload}"
+    )
 
     try:
         output = _run_pipeline_call(pipeline, call_kwargs)
