@@ -1382,10 +1382,11 @@ with shared.gradio_root:
                         # Metadata - scrollable
                         library_image_info = gr.JSON(label='Image Metadata', visible=True, elem_id='library_image_info')
                         
-                        # Multiselect mode toggle
-                        with gr.Row():
-                            library_multiselect_mode = gr.Checkbox(label='Multi-select Mode', value=False, elem_id='library_multiselect_mode')
-                            library_selected_count = gr.HTML(value='', elem_id='library_selected_count', visible=False)
+                        # Selected images list (shown when multiple selected)
+                        library_selected_list = gr.HTML(value='', elem_id='library_selected_list', visible=False)
+                        
+                        # Selection count badge
+                        library_selected_count = gr.HTML(value='', elem_id='library_selected_count', visible=False)
                         
                         # Action buttons
                         with gr.Row():
@@ -1393,7 +1394,7 @@ with shared.gradio_root:
                             library_delete_btn = gr.Button('🗑️ Delete', variant='stop', visible=False)
                             library_delete_selected_btn = gr.Button('🗑️ Delete Selected', variant='stop', visible=False, elem_classes=['delete-selected-btn'])
                         
-                        # Tag editing
+                        # Tag editing (for both single and multiple images)
                         library_edit_tags = gr.Textbox(label='Edit Tags', placeholder='Enter tags separated by comma', visible=False)
                         library_save_tags_btn = gr.Button('💾 Save Tags', variant='secondary', visible=False)
         
@@ -1401,6 +1402,10 @@ with shared.gradio_root:
         library_selected_path = gr.State(value=None)
         # State for multiselect - stores list of selected image paths
         library_selected_paths = gr.State(value=[])
+        # Hidden inputs for JavaScript -> Python communication
+        library_checkbox_path = gr.Textbox(value='', elem_id='library_checkbox_path', visible=False)
+        library_checkbox_selected = gr.Checkbox(value=False, elem_id='library_checkbox_selected', visible=False)
+        library_checkbox_trigger = gr.Button('Checkbox Trigger', elem_id='library_checkbox_trigger', visible=False)
         
         # =========================================================================
         # Configuration Tab Event Handlers
@@ -1815,69 +1820,24 @@ with shared.gradio_root:
             gallery_images = build_gallery_items(images)
             return gr.update(value=gallery_images), gr.update(choices=all_tags)
         
-        def library_on_image_select(evt: gr.SelectData, gallery_value, multiselect_mode, selected_paths):
-            """Handle image selection in gallery."""
+        def library_on_image_select(evt: gr.SelectData, gallery_value, selected_paths):
+            """Handle image selection in gallery.
+            
+            Behavior:
+            - Click on image (not checkbox): Show preview, single select mode
+            - Checkbox handled by JavaScript for multi-select
+            """
             if gallery_value and evt.index < len(gallery_value):
                 selected = gallery_value[evt.index]
                 raw_path, caption = extract_gallery_selection(selected)
                 resolved_path = resolve_library_image_path(raw_path, caption)
 
-                # In multiselect mode, toggle selection
-                if multiselect_mode:
-                    # Toggle selection
-                    if resolved_path in selected_paths:
-                        selected_paths = [p for p in selected_paths if p != resolved_path]
-                    else:
-                        selected_paths = selected_paths + [resolved_path]
-                    
-                    # Update count display
-                    count = len(selected_paths)
-                    count_html = f'<span class="selected-count-badge">{count} image{"s" if count != 1 else ""} selected</span>'
-                    
-                    # In multiselect mode, still show the last selected image preview
-                    lib = get_image_library()
-                    info = lib.get_image_info(resolved_path)
-                    
-                    if info is None:
-                        return (
-                            gr.update(),
-                            None,
-                            gr.update(visible=False),
-                            gr.update(visible=False),
-                            gr.update(visible=False),
-                            gr.update(visible=False),
-                            None,
-                            selected_paths,
-                            gr.update(value=count_html, visible=count > 0),
-                            gr.update(visible=count > 0)
-                        )
-                    
-                    metadata = info.get('metadata', {})
-                    tags = info.get('tags', [])
-                    if isinstance(tags, list):
-                        current_tags = ', '.join(tags)
-                    else:
-                        current_tags = str(tags) if tags else ''
-                    
-                    return (
-                        gr.update(value=info['path']),
-                        metadata,
-                        gr.update(visible=True),
-                        gr.update(visible=False),  # Hide single delete in multiselect mode
-                        gr.update(visible=True, value=current_tags),
-                        gr.update(visible=True),
-                        resolved_path,
-                        selected_paths,
-                        gr.update(value=count_html, visible=count > 0),
-                        gr.update(visible=count > 0)
-                    )
-                
-                # Single select mode
+                # Single select mode - show preview
                 lib = get_image_library()
                 info = lib.get_image_info(resolved_path)
                 
                 if info is None:
-                    return gr.update(), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), None, [], gr.update(visible=False), gr.update(visible=False)
+                    return gr.update(), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), None, [], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
                 
                 # Get current tags - handle both list and string formats
                 tags = info.get('tags', [])
@@ -1897,17 +1857,18 @@ with shared.gradio_root:
                     gr.update(visible=True, value=current_tags),
                     gr.update(visible=True),
                     info['path'],
-                    [],  # Clear multiselect in single mode
+                    [],  # Clear multiselect when single-selecting
                     gr.update(visible=False),
-                    gr.update(visible=False)
+                    gr.update(visible=False),
+                    gr.update(visible=False)  # Hide selected list
                 )
-            return gr.update(), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), None, selected_paths, gr.update(visible=False), gr.update(visible=False)
+            return gr.update(), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), None, selected_paths, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
         
         def library_delete_selected_images(selected_paths):
             """Delete all selected images."""
             if not selected_paths or len(selected_paths) == 0:
                 print("[Library] No images selected for deletion")
-                return gr.update(), gr.update(), [], gr.update(visible=False), gr.update(visible=False)
+                return gr.update(), gr.update(), [], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
             
             print(f"[Library] Deleting {len(selected_paths)} images")
             
@@ -1926,17 +1887,85 @@ with shared.gradio_root:
                 gr.update(value=None),
                 [],  # Clear selected paths
                 gr.update(visible=False),  # Hide count
-                gr.update(visible=False)   # Hide delete selected button
+                gr.update(visible=False),  # Hide delete selected button
+                gr.update(visible=False, value='')  # Hide selected list
             )
         
-        def library_toggle_multiselect_mode(multiselect_mode, selected_paths):
-            """Toggle between single and multiselect mode."""
-            if multiselect_mode:
-                # Switching to multiselect mode - clear previous selections
-                return [], gr.update(visible=False), gr.update(visible=False)
+        def library_update_multiselect(selected_paths):
+            """Update UI when multi-selection changes via checkboxes."""
+            count = len(selected_paths) if selected_paths else 0
+            
+            if count == 0:
+                return (
+                    gr.update(visible=False),  # count
+                    gr.update(visible=False),  # delete selected btn
+                    gr.update(visible=False, value=''),  # selected list
+                    gr.update(visible=False),  # edit tags
+                    gr.update(visible=False)   # save tags btn
+                )
+            
+            # Build selected images list HTML
+            list_html = '<div class="selected-images-list">'
+            for path in selected_paths:
+                filename = os.path.basename(path) if path else 'Unknown'
+                list_html += f'<div class="selected-image-item"><span class="selected-image-name">{filename}</span></div>'
+            list_html += '</div>'
+            
+            count_html = f'<span class="selected-count-badge">{count} image{"s" if count != 1 else ""} selected</span>'
+            
+            return (
+                gr.update(value=count_html, visible=True),  # count
+                gr.update(visible=True),  # delete selected btn
+                gr.update(value=list_html, visible=True),  # selected list
+                gr.update(visible=True),  # edit tags
+                gr.update(visible=True)   # save tags btn
+            )
+        
+        def library_multiselect_checkbox(is_selected, image_path, selected_paths):
+            """Handle checkbox click for multi-select."""
+            if not image_path:
+                return selected_paths, gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+            
+            # Resolve the path
+            resolved_path = resolve_library_image_path(image_path)
+            
+            if is_selected:
+                # Add to selection
+                if resolved_path not in selected_paths:
+                    selected_paths = selected_paths + [resolved_path]
             else:
-                # Switching to single select mode - clear selections
-                return [], gr.update(visible=False), gr.update(visible=False)
+                # Remove from selection
+                selected_paths = [p for p in selected_paths if p != resolved_path]
+            
+            # Update UI
+            count = len(selected_paths)
+            if count == 0:
+                return (
+                    selected_paths,
+                    gr.update(visible=False),
+                    gr.update(visible=False),
+                    gr.update(visible=False, value=''),
+                    gr.update(visible=False),
+                    gr.update(visible=False)
+                )
+            
+            # Build selected images list HTML
+            list_html = '<div class="selected-images-list">'
+            for path in selected_paths:
+                filename = os.path.basename(path) if path else 'Unknown'
+                list_html += f'<div class="selected-image-item"><span class="selected-image-name">{filename}</span></div>'
+            list_html += '</div>'
+            
+            count_html = f'<span class="selected-count-badge">{count} image{"s" if count != 1 else ""} selected</span>'
+            
+            return (
+                selected_paths,
+                gr.update(value=count_html, visible=True),
+                gr.update(visible=True),
+                gr.update(value=list_html, visible=True),
+                gr.update(visible=True),
+                gr.update(visible=True)
+            )
         
         def library_load_settings(image_info):
             """Load settings from selected image to the generator."""
@@ -1954,11 +1983,8 @@ with shared.gradio_root:
                 print(f"Error loading settings: {e}")
                 return [gr.update()] * len(load_data_outputs)
         
-        def library_save_tags(image_path, new_tags):
-            """Save tags to the selected image."""
-            if not image_path:
-                return gr.update()
-            
+        def library_save_tags(image_path, new_tags, selected_paths):
+            """Save tags to the selected image(s)."""
             lib = get_image_library()
             
             # Convert comma-separated tags to list
@@ -1967,12 +1993,20 @@ with shared.gradio_root:
             else:
                 tags_list = new_tags
             
-            success = lib.update_image_tags(image_path, tags_list)
-            
-            if success:
+            # If multiple images selected, apply tags to all
+            if selected_paths and len(selected_paths) > 0:
+                for path in selected_paths:
+                    lib.update_image_tags(path, tags_list)
                 # Refresh tags dropdown
                 all_tags = list(lib.get_all_tags().keys())
                 return gr.update(choices=all_tags)
+            elif image_path:
+                # Single image
+                success = lib.update_image_tags(image_path, tags_list)
+                if success:
+                    all_tags = list(lib.get_all_tags().keys())
+                    return gr.update(choices=all_tags)
+            
             return gr.update()
         
         def library_delete_image(image_path):
@@ -2036,17 +2070,10 @@ with shared.gradio_root:
         
         library_gallery.select(
             library_on_image_select,
-            inputs=[library_gallery, library_multiselect_mode, library_selected_paths],
+            inputs=[library_gallery, library_selected_paths],
             outputs=[library_selected_image, library_image_info, library_load_settings_btn, 
                      library_delete_btn, library_edit_tags, library_save_tags_btn, library_selected_path,
-                     library_selected_paths, library_selected_count, library_delete_selected_btn]
-        )
-        
-        # Multiselect mode toggle
-        library_multiselect_mode.change(
-            library_toggle_multiselect_mode,
-            inputs=[library_multiselect_mode, library_selected_paths],
-            outputs=[library_selected_paths, library_selected_count, library_delete_selected_btn]
+                     library_selected_paths, library_selected_count, library_delete_selected_btn, library_selected_list]
         )
         
         # Delete selected images button
@@ -2054,7 +2081,15 @@ with shared.gradio_root:
             library_delete_selected_images,
             inputs=[library_selected_paths],
             outputs=[library_gallery, library_selected_image, library_selected_paths, 
-                     library_selected_count, library_delete_selected_btn]
+                     library_selected_count, library_delete_selected_btn, library_selected_list]
+        )
+        
+        # Checkbox trigger for multi-select
+        library_checkbox_trigger.click(
+            library_multiselect_checkbox,
+            inputs=[library_checkbox_selected, library_checkbox_path, library_selected_paths],
+            outputs=[library_selected_paths, library_selected_count, library_delete_selected_btn, 
+                     library_selected_list, library_edit_tags, library_save_tags_btn]
         )
         
         library_load_settings_btn.click(
@@ -2065,7 +2100,7 @@ with shared.gradio_root:
         
         library_save_tags_btn.click(
             library_save_tags,
-            inputs=[library_selected_path, library_edit_tags],
+            inputs=[library_selected_path, library_edit_tags, library_selected_paths],
             outputs=[library_tags_filter]
         )
         

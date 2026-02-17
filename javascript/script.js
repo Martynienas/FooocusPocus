@@ -264,8 +264,14 @@ function htmlDecode(input) {
 
 /**
  * Image Library Multiselect functionality
+ * 
+ * Selection behavior:
+ * - Click on image (not checkbox) -> Single select, show preview
+ * - Click on checkbox -> Toggle multi-select for that image
+ * - When multiple images selected -> Show list of selected images, no preview
  */
-var librarySelectedImages = new Set();
+var librarySelectedImages = new Set();  // Stores image paths
+var libraryImagePaths = [];  // Maps index to path
 
 // Initialize multiselect functionality when UI loads
 onUiLoaded(function() {
@@ -277,40 +283,96 @@ function initLibraryMultiselect() {
     const observer = new MutationObserver(function(mutations) {
         const gallery = document.getElementById('library_gallery');
         if (gallery) {
-            updateGallerySelectionMode();
+            setupGalleryHandlers();
         }
     });
     
     observer.observe(document.body, { childList: true, subtree: true });
     
     // Initial setup
-    setTimeout(updateGallerySelectionMode, 500);
+    setTimeout(setupGalleryHandlers, 500);
 }
 
-function updateGallerySelectionMode() {
-    const multiselectCheckbox = document.getElementById('library_multiselect_mode');
+function setupGalleryHandlers() {
     const gallery = document.getElementById('library_gallery');
-    
     if (!gallery) return;
     
-    if (multiselectCheckbox) {
-        const isMultiselect = multiselectCheckbox.querySelector('input')?.checked;
+    // Get all image paths from the gallery
+    updateImagePaths(gallery);
+    
+    // Add click handlers to thumbnails
+    const thumbnails = gallery.querySelectorAll('.thumbnail-item');
+    thumbnails.forEach(function(thumb, index) {
+        // Remove any existing handlers
+        thumb.removeEventListener('click', handleThumbnailClick);
+        thumb.addEventListener('click', handleThumbnailClick);
         
-        if (isMultiselect) {
-            gallery.classList.add('multiselect-mode');
-            // Add click handlers to thumbnails
-            const thumbnails = gallery.querySelectorAll('.thumbnail-item');
-            thumbnails.forEach(function(thumb, index) {
-                thumb.onclick = function(e) {
-                    e.stopPropagation();
-                    toggleThumbnailSelection(thumb, index);
-                };
-            });
-        } else {
-            gallery.classList.remove('multiselect-mode');
-            clearAllSelections();
+        // Set data attribute for index
+        thumb.dataset.imageIndex = index;
+    });
+}
+
+function updateImagePaths(gallery) {
+    // Extract paths from gallery items
+    libraryImagePaths = [];
+    const items = gallery.querySelectorAll('.thumbnail-item img');
+    items.forEach(function(img, index) {
+        // Get the src and extract the path
+        const src = img.src;
+        // The path is usually in the src as a file path or data attribute
+        // We'll store the src for now and let Python resolve it
+        libraryImagePaths[index] = src;
+    });
+}
+
+function handleThumbnailClick(e) {
+    const thumb = e.target.closest('.thumbnail-item');
+    if (!thumb) return;
+    
+    const index = parseInt(thumb.dataset.imageIndex, 10);
+    const rect = thumb.getBoundingClientRect();
+    
+    // Check if click is in the checkbox area (top-right corner, 20x20px)
+    const checkboxArea = {
+        left: rect.right - 25,
+        right: rect.right - 5,
+        top: rect.top + 5,
+        bottom: rect.top + 25
+    };
+    
+    const isCheckboxClick = (
+        e.clientX >= checkboxArea.left &&
+        e.clientX <= checkboxArea.right &&
+        e.clientY >= checkboxArea.top &&
+        e.clientY <= checkboxArea.bottom
+    );
+    
+    if (isCheckboxClick) {
+        // Toggle selection
+        e.preventDefault();
+        e.stopPropagation();
+        toggleThumbnailSelection(thumb, index);
+        
+        // Communicate with Python via hidden inputs
+        const pathInput = document.getElementById('library_checkbox_path');
+        const selectedInput = document.getElementById('library_checkbox_selected');
+        const triggerBtn = document.getElementById('library_checkbox_trigger');
+        
+        if (pathInput && selectedInput && triggerBtn) {
+            // Get the image path from the thumbnail
+            const img = thumb.querySelector('img');
+            const imagePath = img ? img.src : libraryImagePaths[index];
+            
+            // Update hidden inputs
+            pathInput.value = imagePath;
+            selectedInput.checked = thumb.classList.contains('selected');
+            
+            // Trigger the hidden button to send data to Python
+            triggerBtn.click();
         }
     }
+    // For non-checkbox clicks, let the default Gradio gallery select handler work
+    // This will show the preview
 }
 
 function toggleThumbnailSelection(thumb, index) {
@@ -320,6 +382,23 @@ function toggleThumbnailSelection(thumb, index) {
     } else {
         thumb.classList.add('selected');
         librarySelectedImages.add(index);
+    }
+    
+    // Update the selected count display
+    updateSelectedCountDisplay();
+}
+
+function updateSelectedCountDisplay() {
+    const count = librarySelectedImages.size;
+    const countElement = document.getElementById('library_selected_count');
+    if (countElement) {
+        if (count > 0) {
+            countElement.innerHTML = `<span class="selected-count-badge">${count} image${count !== 1 ? 's' : ''} selected</span>`;
+            countElement.style.display = 'inline-block';
+        } else {
+            countElement.innerHTML = '';
+            countElement.style.display = 'none';
+        }
     }
 }
 
@@ -331,40 +410,42 @@ function clearAllSelections() {
         });
     }
     librarySelectedImages.clear();
+    updateSelectedCountDisplay();
 }
 
-// Watch for multiselect checkbox changes
-document.addEventListener('change', function(e) {
-    if (e.target.id === 'library_multiselect_mode' || 
-        e.target.closest('#library_multiselect_mode')) {
-        setTimeout(updateGallerySelectionMode, 100);
-        if (!e.target.checked) {
-            clearAllSelections();
-        }
+function getSelectedPaths() {
+    // Return array of paths for selected images
+    return Array.from(librarySelectedImages).map(function(index) {
+        return libraryImagePaths[index];
+    }).filter(function(path) {
+        return path !== undefined;
+    });
+}
+
+// Re-apply selections when gallery content changes
+onUiUpdate(function(mutations) {
+    const gallery = document.getElementById('library_gallery');
+    if (gallery) {
+        updateImagePaths(gallery);
+        
+        // Re-apply selection state to thumbnails
+        setTimeout(function() {
+            const thumbnails = gallery.querySelectorAll('.thumbnail-item');
+            thumbnails.forEach(function(thumb, index) {
+                thumb.dataset.imageIndex = index;
+                thumb.removeEventListener('click', handleThumbnailClick);
+                thumb.addEventListener('click', handleThumbnailClick);
+                
+                // Restore selection state
+                if (librarySelectedImages.has(index)) {
+                    thumb.classList.add('selected');
+                }
+            });
+        }, 100);
     }
 });
 
-// Clear selections when gallery content changes
-onUiUpdate(function(mutations) {
-    const gallery = document.getElementById('library_gallery');
-    const multiselectCheckbox = document.getElementById('library_multiselect_mode');
-    
-    if (gallery && multiselectCheckbox) {
-        const isMultiselect = multiselectCheckbox.querySelector('input')?.checked;
-        if (isMultiselect) {
-            // Re-apply selection mode to new thumbnails
-            setTimeout(function() {
-                const thumbnails = gallery.querySelectorAll('.thumbnail-item');
-                thumbnails.forEach(function(thumb, index) {
-                    if (librarySelectedImages.has(index)) {
-                        thumb.classList.add('selected');
-                    }
-                    thumb.onclick = function(e) {
-                        e.stopPropagation();
-                        toggleThumbnailSelection(thumb, index);
-                    };
-                });
-            }, 100);
-        }
-    }
+// Listen for clear selections event from Python
+document.addEventListener('libraryClearSelections', function() {
+    clearAllSelections();
 });
