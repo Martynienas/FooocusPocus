@@ -902,6 +902,9 @@ def worker():
         )
         if source_path is None:
             progressbar(async_task, 100, f'Z-Image model source not found: {async_task.base_model_name}')
+            print('[Z-Image POC] Checked checkpoint folders:')
+            for p in modules.config.paths_checkpoints:
+                print(f'  - {p}')
             return
 
         print(f'[Z-Image POC] Source: {source_kind} @ {source_path}')

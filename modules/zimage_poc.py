@@ -102,6 +102,20 @@ def _resolve_named_path(name: str, checkpoint_folders: list[str]) -> Optional[st
         if os.path.exists(candidate):
             return candidate
 
+    # Fallback: match by basename anywhere inside configured checkpoint folders.
+    target = os.path.basename(name).casefold()
+    for folder in checkpoint_folders:
+        if not os.path.isdir(folder):
+            continue
+        for root, _, files in os.walk(folder, topdown=True):
+            for file_name in files:
+                if file_name.casefold() == target:
+                    return os.path.abspath(os.path.realpath(os.path.join(root, file_name)))
+        for root, dirs, _ in os.walk(folder, topdown=True):
+            for dir_name in dirs:
+                if dir_name.casefold() == target:
+                    return os.path.abspath(os.path.realpath(os.path.join(root, dir_name)))
+
     return None
 
 
