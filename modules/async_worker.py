@@ -752,6 +752,14 @@ def worker():
                 log_negative_prompt='\n'.join([task_negative_prompt] + task_extra_negative_prompts),
                 styles=task_styles
             ))
+        expansion_available = (
+            pipeline.final_expansion is not None and getattr(pipeline.final_expansion, "available", True)
+        )
+        if use_expansion and not expansion_available:
+            reason = getattr(pipeline.final_expansion, "reason", "unavailable")
+            print(f"[Prompt Expansion] Disabled at runtime: {reason}")
+            use_expansion = False
+
         if use_expansion:
             if advance_progress:
                 current_progress += 1

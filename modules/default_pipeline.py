@@ -8,7 +8,7 @@ import ldm_patched.modules.model_management
 import ldm_patched.modules.latent_formats
 import modules.inpaint_worker
 import extras.vae_interpose as vae_interpose
-from extras.expansion import FooocusExpansion
+from extras.expansion import FooocusExpansion, DisabledFooocusExpansion
 
 from ldm_patched.modules.model_base import SDXL, SDXLRefiner
 from modules.sample_hijack import clip_separate
@@ -225,7 +225,10 @@ def prepare_text_encoder(async_call=True):
         # TODO: make sure that this is always called in an async way so that users cannot feel it.
         pass
     assert_model_integrity()
-    ldm_patched.modules.model_management.load_models_gpu([final_clip.patcher, final_expansion.patcher])
+    patchers = [final_clip.patcher]
+    if final_expansion is not None and getattr(final_expansion, "patcher", None) is not None:
+        patchers.append(final_expansion.patcher)
+    ldm_patched.modules.model_management.load_models_gpu(patchers)
     return
 
 
@@ -260,7 +263,10 @@ def refresh_everything(refiner_model_name, base_model_name, loras,
     final_refiner_vae = model_refiner.vae
 
     if final_expansion is None:
-        final_expansion = FooocusExpansion()
+        try:
+            final_expansion = FooocusExpansion()
+        except Exception as e:
+            final_expansion = DisabledFooocusExpansion(str(e))
 
     prepare_text_encoder(async_call=True)
     clear_all_caches()
