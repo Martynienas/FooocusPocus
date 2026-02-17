@@ -1393,7 +1393,6 @@ with shared.gradio_root:
                         with gr.Row():
                             library_load_settings_btn = gr.Button('📋 Load Settings', variant='primary', visible=False)
                             library_delete_btn = gr.Button('🗑️ Delete', variant='stop', visible=False)
-                            library_delete_selected_btn = gr.Button('🗑️ Delete Selected', variant='stop', visible=False, elem_classes=['delete-selected-btn'])
                         
                         # Tag editing (for both single and multiple images)
                         library_edit_tags = gr.Textbox(label='Edit Tags', placeholder='Enter tags separated by comma', visible=False)
@@ -1896,7 +1895,7 @@ with shared.gradio_root:
                 info = lib.get_image_info(resolved_path)
                 
                 if info is None:
-                    return gr.update(), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), None, [], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
+                    return gr.update(), None, gr.update(visible=False), gr.update(visible=False, value='🗑️ Delete'), gr.update(visible=False), gr.update(visible=False), None, [], gr.update(visible=False), gr.update(visible=False)
                 
                 # Get current tags - handle both list and string formats
                 tags = info.get('tags', [])
@@ -1912,44 +1911,15 @@ with shared.gradio_root:
                     gr.update(value=info['path']),
                     metadata,
                     gr.update(visible=True),
-                    gr.update(visible=True),
+                    gr.update(visible=True, value='🗑️ Delete'),
                     gr.update(visible=True, value=current_tags),
                     gr.update(visible=True),
                     info['path'],
                     [],  # Clear multiselect when single-selecting
                     gr.update(visible=False),
-                    gr.update(visible=False),
                     gr.update(visible=False)  # Hide selected list
                 )
-            return gr.update(), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), None, selected_paths, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
-        
-        def library_delete_selected_images(selected_paths):
-            """Delete all selected images."""
-            selected_paths = normalize_selected_paths(selected_paths)
-            if not selected_paths:
-                print("[Library] No images selected for deletion")
-                return gr.update(), gr.update(), [], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
-            
-            print(f"[Library] Deleting {len(selected_paths)} images")
-            
-            lib = get_image_library()
-            success_count, failed_paths = lib.delete_images(selected_paths)
-            
-            print(f"[Library] Deleted {success_count} images, {len(failed_paths)} failed")
-            
-            # Refresh gallery
-            lib.clear_cache()
-            images = lib.scan_images(force_refresh=True)
-            gallery_images = build_gallery_items(images)
-            
-            return (
-                gr.update(value=gallery_images),
-                gr.update(value=None),
-                [],  # Clear selected paths
-                gr.update(visible=False),  # Hide count
-                gr.update(visible=False),  # Hide delete selected button
-                gr.update(visible=False, value='')  # Hide selected list
-            )
+            return gr.update(), None, gr.update(visible=False), gr.update(visible=False, value='🗑️ Delete'), gr.update(visible=False), gr.update(visible=False), None, selected_paths, gr.update(visible=False), gr.update(visible=False)
         
         def library_update_multiselect(selected_paths):
             """Update UI when multi-selection changes via checkboxes."""
@@ -1959,7 +1929,7 @@ with shared.gradio_root:
             if count == 0:
                 return (
                     gr.update(visible=False),  # count
-                    gr.update(visible=False),  # delete selected btn
+                    gr.update(visible=False, value='🗑️ Delete'),  # delete btn
                     gr.update(visible=False, value=''),  # selected list
                     gr.update(visible=False),  # edit tags
                     gr.update(visible=False)   # save tags btn
@@ -1972,7 +1942,7 @@ with shared.gradio_root:
             
             return (
                 gr.update(value=count_html, visible=True),  # count
-                gr.update(visible=True),  # delete selected btn
+                gr.update(visible=True, value=f'🗑️ Delete Selected ({count})'),  # delete btn
                 gr.update(value=list_html, visible=True),  # selected list
                 gr.update(visible=True),  # edit tags
                 gr.update(visible=True)   # save tags btn
@@ -2066,34 +2036,62 @@ with shared.gradio_root:
             
             return gr.update()
         
-        def library_delete_image(image_path):
-            """Delete the selected image."""
-            print(f"[Library] Delete requested for: {image_path}")
-            
-            if not image_path:
-                print("[Library] No image path provided")
-                return gr.update(), gr.update(), None
-            
+        def library_delete_action(image_path, selected_paths):
+            """Delete selected image(s) using a single button for single and multiselect modes."""
+            selected_paths = normalize_selected_paths(selected_paths)
             lib = get_image_library()
-            resolved_path = resolve_library_image_path(image_path)
-            
-            print(f"[Library] Attempting to delete: {resolved_path}")
-            success = lib.delete_image(resolved_path)
-            print(f"[Library] Delete result: {success}")
-            
-            if success:
-                # Refresh gallery
-                lib.clear_cache()
-                images = lib.scan_images(force_refresh=True)
-                gallery_images = build_gallery_items(images)
-                print(f"[Library] Gallery refreshed with {len(gallery_images)} images")
+
+            if selected_paths:
+                print(f"[Library] Deleting {len(selected_paths)} selected image(s)")
+                success_count, failed_paths = lib.delete_images(selected_paths)
+                print(f"[Library] Deleted {success_count} image(s), {len(failed_paths)} failed")
+            else:
+                print(f"[Library] Delete requested for: {image_path}")
+                if not image_path:
+                    print("[Library] No image path provided")
+                    return (
+                        gr.update(),
+                        gr.update(),
+                        image_path,
+                        selected_paths,
+                        gr.update(),
+                        gr.update(),
+                        gr.update()
+                    )
+
+                resolved_path = resolve_library_image_path(image_path)
+                print(f"[Library] Attempting to delete: {resolved_path}")
+                success = lib.delete_image(resolved_path)
+                print(f"[Library] Delete result: {success}")
+                if success:
+                    success_count, failed_paths = 1, []
+                else:
+                    success_count, failed_paths = 0, [resolved_path]
+
+            if success_count == 0:
                 return (
-                    gr.update(value=gallery_images),
-                    gr.update(value=None),
-                    None
+                    gr.update(),
+                    gr.update(),
+                    image_path,
+                    selected_paths,
+                    gr.update(),
+                    gr.update(),
+                    gr.update()
                 )
-            print(f"[Library] Delete failed for: {resolved_path}")
-            return gr.update(), gr.update(), image_path
+
+            lib.clear_cache()
+            images = lib.scan_images(force_refresh=True)
+            gallery_images = build_gallery_items(images)
+            print(f"[Library] Gallery refreshed with {len(gallery_images)} images")
+            return (
+                gr.update(value=gallery_images),
+                gr.update(value=None),
+                None,
+                [],
+                gr.update(visible=False, value=''),
+                gr.update(visible=False, value=''),
+                gr.update(visible=False, value='🗑️ Delete')
+            )
         
         # Modal open/close handlers
         def open_library_modal(auto_load):
@@ -2130,24 +2128,15 @@ with shared.gradio_root:
             inputs=[library_gallery, library_selected_paths],
             outputs=[library_selected_image, library_image_info, library_load_settings_btn, 
                      library_delete_btn, library_edit_tags, library_save_tags_btn, library_selected_path,
-                     library_selected_paths, library_selected_count, library_delete_selected_btn, library_selected_list],
+                     library_selected_paths, library_selected_count, library_selected_list],
             _js='(gallery, selected_paths) => { if (typeof clearAllSelections === "function") { clearAllSelections(); } return [gallery, selected_paths]; }'
-        )
-        
-        # Delete selected images button
-        library_delete_selected_btn.click(
-            library_delete_selected_images,
-            inputs=[library_selected_paths],
-            outputs=[library_gallery, library_selected_image, library_selected_paths, 
-                     library_selected_count, library_delete_selected_btn, library_selected_list],
-            _js='(selected_paths) => { if (typeof clearAllSelections === "function") { clearAllSelections(); } return [selected_paths]; }'
         )
         
         # Checkbox trigger for multi-select
         library_checkbox_trigger.click(
             library_multiselect_checkbox,
             inputs=[library_checkbox_selected, library_checkbox_path, library_selected_paths],
-            outputs=[library_selected_paths, library_selected_count, library_delete_selected_btn, 
+            outputs=[library_selected_paths, library_selected_count, library_delete_btn, 
                      library_selected_list, library_edit_tags, library_save_tags_btn]
         )
         
@@ -2164,9 +2153,11 @@ with shared.gradio_root:
         )
         
         library_delete_btn.click(
-            library_delete_image,
-            inputs=[library_selected_path],
-            outputs=[library_gallery, library_selected_image, library_selected_path]
+            library_delete_action,
+            inputs=[library_selected_path, library_selected_paths],
+            outputs=[library_gallery, library_selected_image, library_selected_path,
+                     library_selected_paths, library_selected_count, library_selected_list, library_delete_btn],
+            _js='(selected_path, selected_paths) => { if (typeof clearAllSelections === "function") { clearAllSelections(); } return [selected_path, selected_paths]; }'
         )
         
         # Search and filter events
