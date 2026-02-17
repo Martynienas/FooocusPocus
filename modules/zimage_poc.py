@@ -75,6 +75,21 @@ def list_zimage_model_entries(checkpoint_folders: list[str]) -> list[str]:
     return sorted(set(entries), key=str.casefold)
 
 
+def resolve_zimage_model_path(name: str, checkpoint_folders: list[str]) -> Optional[str]:
+    if not isinstance(name, str) or not name.strip():
+        return None
+
+    if os.path.isabs(name) and is_zimage_model_directory(name):
+        return name
+
+    for folder in checkpoint_folders:
+        candidate = os.path.abspath(os.path.realpath(os.path.join(folder, name)))
+        if is_zimage_model_directory(candidate):
+            return candidate
+
+    return None
+
+
 def _resolve_named_path(name: str, checkpoint_folders: list[str]) -> Optional[str]:
     if not isinstance(name, str) or not name.strip():
         return None
@@ -91,7 +106,9 @@ def _resolve_named_path(name: str, checkpoint_folders: list[str]) -> Optional[st
 
 
 def _is_likely_zimage_safetensors(path: str) -> bool:
-    if not os.path.isfile(path) or not path.lower().endswith(".safetensors"):
+    if not os.path.isfile(path):
+        return False
+    if not path.lower().endswith(".safetensors"):
         return False
 
     try:
@@ -99,13 +116,18 @@ def _is_likely_zimage_safetensors(path: str) -> bool:
 
         with safe_open(path, framework="pt", device="cpu") as f:
             keys = set(f.keys())
+
             if any(k.startswith("text_encoders.qwen3_4b.") for k in keys):
                 return True
+
             if "cap_embedder.1.weight" in keys:
-                shape = tuple(f.get_tensor("cap_embedder.1.weight").shape)
-                if len(shape) >= 1 and shape[0] == 3840:
+                cap_shape = tuple(f.get_tensor("cap_embedder.1.weight").shape)
+                if len(cap_shape) >= 1 and cap_shape[0] == 3840:
                     return True
-            if any(k.startswith("layers.0.attention.") for k in keys):
+
+            has_lumina_backbone = any(k.startswith("layers.0.attention.") for k in keys)
+            has_zimage_text = any(k.startswith("text_encoders.") and "qwen3" in k for k in keys)
+            if has_lumina_backbone and has_zimage_text:
                 return True
     except Exception:
         return False
@@ -139,7 +161,6 @@ def ensure_zimage_repo_download(flavor: str, checkpoint_folders: list[str]) -> s
     local_dir = os.path.join(base_dir, relative)
     os.makedirs(local_dir, exist_ok=True)
 
-    # If already present and valid, skip network.
     if is_zimage_model_directory(local_dir):
         return local_dir
 
@@ -206,7 +227,6 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
             local_files_only=False,
         )
     elif source_kind == "single_file":
-        # Some diffusers builds do not support single-file loading for custom pipelines.
         if hasattr(DiffusionPipeline, "from_single_file"):
             pipeline = DiffusionPipeline.from_single_file(
                 source_path,
@@ -216,7 +236,6 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
                 local_files_only=False,
             )
         else:
-            # Universal fallback: download/load official repo layout.
             fallback_dir = ensure_zimage_repo_download(flavor, checkpoint_folders)
             pipeline = DiffusionPipeline.from_pretrained(
                 fallback_dir,
