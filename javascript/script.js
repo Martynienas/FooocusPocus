@@ -277,6 +277,13 @@ var libraryGalleryObserver = null;
 var observedLibraryGallery = null;
 var libraryBootstrapTimer = null;
 
+function isLibraryModalOpen() {
+    const modal = document.getElementById('image_library_modal');
+    if (!modal) return false;
+    const style = getComputedStyle(modal);
+    return style.display !== 'none' && style.visibility !== 'hidden';
+}
+
 function getGradioInputElement(elemId) {
     const root = document.getElementById(elemId);
     if (!root) return null;
@@ -405,6 +412,7 @@ function ensureLibraryGalleryObserver(gallery) {
 
     observedLibraryGallery = gallery;
     libraryGalleryObserver = new MutationObserver(function(mutations) {
+        if (!isLibraryModalOpen()) return;
         const hasStructuralChange = mutations.some(function(m) {
             return m.type === 'childList' && (m.addedNodes.length > 0 || m.removedNodes.length > 0);
         });
@@ -419,6 +427,7 @@ function setupGalleryHandlers() {
     const gallery = document.getElementById('library_gallery');
     if (!gallery) return;
     ensureLibraryGalleryObserver(gallery);
+    if (!isLibraryModalOpen()) return;
     
     // Get all image paths from the gallery
     updateImagePaths(gallery);
