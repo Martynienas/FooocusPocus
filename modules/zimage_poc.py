@@ -329,15 +329,7 @@ def _ensure_single_file_component_dir(
     return local_config, try_config_only_text_encoder
 
 
-def _extract_prefixed_state_dict(sd: dict, prefixes: list[str]) -> dict:
-    for pref in prefixes:
-        part = {k[len(pref):]: v for k, v in sd.items() if k.startswith(pref)}
-        if part:
-            return part
-    return {}
-
-
-def _split_single_file_state_dict(single_file_path: str) -> dict[str, dict]:
+def _split_single_file_state_dict(single_file_path: str, include_aux_weights: bool = False) -> dict[str, dict]:
     from safetensors import safe_open
 
     transformer_prefixes = ["model.diffusion_model.", "diffusion_model.", "transformer."]
@@ -359,18 +351,34 @@ def _split_single_file_state_dict(single_file_path: str) -> dict[str, dict]:
             if hit:
                 continue
 
-            for pref in text_prefixes:
-                if key.startswith(pref):
-                    text_sd[key[len(pref):]] = f.get_tensor(key)
-                    hit = True
-                    break
-            if hit:
-                continue
+            if include_aux_weights:
+                for pref in text_prefixes:
+                    if key.startswith(pref):
+                        text_sd[key[len(pref):]] = f.get_tensor(key)
+                        hit = True
+                        break
+                if hit:
+                    continue
 
-            for pref in vae_prefixes:
-                if key.startswith(pref):
-                    vae_sd[key[len(pref):]] = f.get_tensor(key)
-                    break
+                for pref in vae_prefixes:
+                    if key.startswith(pref):
+                        vae_sd[key[len(pref):]] = f.get_tensor(key)
+                        hit = True
+                        break
+                if hit:
+                    continue
+
+            # Plain diffusion-model safetensors often contain bare transformer keys.
+            # Keep all non-text/non-vae tensors as transformer weights.
+            if any(key.startswith(pref) for pref in text_prefixes):
+                if include_aux_weights:
+                    text_sd[key] = f.get_tensor(key)
+                continue
+            if any(key.startswith(pref) for pref in vae_prefixes):
+                if include_aux_weights:
+                    vae_sd[key] = f.get_tensor(key)
+                continue
+            transformer_sd[key] = f.get_tensor(key)
 
     return {
         "transformer": transformer_sd,
@@ -380,7 +388,7 @@ def _split_single_file_state_dict(single_file_path: str) -> dict[str, dict]:
 
 
 def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) -> None:
-    parts = _split_single_file_state_dict(single_file_path)
+    parts = _split_single_file_state_dict(single_file_path, include_aux_weights=True)
     transformer_sd = parts["transformer"]
 
     if not transformer_sd:
@@ -440,12 +448,17 @@ def _apply_component_state_dict(
     print(f"[Z-Image POC] Loaded {label} from single-file ({len(state_dict)} tensors).")
 
 
-def _build_pipeline_from_single_file_components(local_config: str, single_file_path: str, torch_dtype):
+def _build_pipeline_from_single_file_components(
+    local_config: str,
+    single_file_path: str,
+    torch_dtype,
+    prefer_single_file_aux_weights: bool = False,
+):
     from diffusers import DiffusionPipeline
     from transformers import AutoConfig, AutoModel
 
     model_index = _read_json(os.path.join(local_config, "model_index.json"))
-    parts = _split_single_file_state_dict(single_file_path)
+    parts = _split_single_file_state_dict(single_file_path, include_aux_weights=prefer_single_file_aux_weights)
 
     pipeline_class_name = str(model_index.get("_class_name", ""))
     pipeline_cls = getattr(importlib.import_module("diffusers"), pipeline_class_name, None)
@@ -500,8 +513,9 @@ def _build_pipeline_from_single_file_components(local_config: str, single_file_p
         missing_limit=None,
         unexpected_limit=None,
     )
-    _apply_component_state_dict(getattr(pipeline, "text_encoder", None), parts["text_encoder"], label="text_encoder")
-    _apply_component_state_dict(getattr(pipeline, "vae", None), parts["vae"], label="vae")
+    if prefer_single_file_aux_weights:
+        _apply_component_state_dict(getattr(pipeline, "text_encoder", None), parts["text_encoder"], label="text_encoder")
+        _apply_component_state_dict(getattr(pipeline, "vae", None), parts["vae"], label="vae")
 
     if not parts["transformer"]:
         raise RuntimeError("Single-file Z-Image checkpoint does not contain transformer weights in expected format.")
@@ -659,6 +673,12 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
     from diffusers import DiffusionPipeline
 
     _ensure_zimage_runtime_compatibility()
+    prefer_single_file_aux_weights = os.environ.get("FOOOCUS_ZIMAGE_LOAD_AIO_AUX", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
     device, dtype = _pick_device_and_dtype()
 
@@ -678,7 +698,12 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
         # weights (which may not exist and can cause long delays).
         split_error = None
         try:
-            pipeline = _build_pipeline_from_single_file_components(local_config, source_path, dtype)
+            pipeline = _build_pipeline_from_single_file_components(
+                local_config,
+                source_path,
+                dtype,
+                prefer_single_file_aux_weights=prefer_single_file_aux_weights,
+            )
         except Exception as e:
             split_error = e
             print(f"[Z-Image POC] Split-loader fallback due to: {e}")
@@ -751,12 +776,25 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
 
 
 def _run_pipeline_call(pipeline, call_kwargs: dict):
-    try:
-        return pipeline(**call_kwargs)
-    except TypeError:
-        call_kwargs = dict(call_kwargs)
-        call_kwargs.pop("negative_prompt", None)
-        return pipeline(**call_kwargs)
+    kwargs = dict(call_kwargs)
+    optional_drop_order = [
+        "cfg_normalization",
+        "cfg_truncation",
+        "max_sequence_length",
+        "negative_prompt",
+    ]
+    for _ in range(len(optional_drop_order) + 1):
+        try:
+            return pipeline(**kwargs)
+        except TypeError:
+            dropped = False
+            for key in optional_drop_order:
+                if key in kwargs:
+                    kwargs.pop(key, None)
+                    dropped = True
+                    break
+            if not dropped:
+                raise
 
 
 def generate_zimage(
@@ -771,11 +809,24 @@ def generate_zimage(
     steps: int,
     guidance_scale: float,
     seed: int,
+    shift: float = 9.0,
 ):
     import torch
 
     pipeline, generator_device, used_offload = _load_pipeline(source_kind, source_path, flavor, checkpoint_folders)
     generator = torch.Generator(device=generator_device).manual_seed(seed)
+
+    # Align scheduler shift with Forge-style "Shift" control when available.
+    try:
+        if hasattr(pipeline, "scheduler") and hasattr(pipeline.scheduler, "config"):
+            if hasattr(pipeline.scheduler.config, "shift"):
+                pipeline.scheduler.config.shift = float(shift)
+            if hasattr(pipeline.scheduler, "shift"):
+                pipeline.scheduler.shift = float(shift)
+    except Exception:
+        pass
+
+    max_sequence_length = 256 if flavor == "turbo" else 512
 
     call_kwargs = dict(
         prompt=prompt,
@@ -785,8 +836,11 @@ def generate_zimage(
         guidance_scale=guidance_scale,
         generator=generator,
         num_images_per_prompt=1,
+        cfg_normalization=False,
+        cfg_truncation=1.0,
+        max_sequence_length=max_sequence_length,
     )
-    if negative_prompt:
+    if negative_prompt and guidance_scale > 1.0:
         call_kwargs["negative_prompt"] = negative_prompt
 
     try:

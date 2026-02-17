@@ -957,6 +957,7 @@ def worker():
                     steps=async_task.steps,
                     guidance_scale=float(async_task.cfg_scale),
                     seed=task_seed,
+                    shift=float(async_task.adaptive_cfg),
                 )
                 np_image = np.array(pil_image)
             except ModuleNotFoundError as e:
