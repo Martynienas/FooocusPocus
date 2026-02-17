@@ -623,7 +623,7 @@ def _apply_component_state_dict(
     unexpected_limit: Optional[int] = None,
 ):
     if component is None or not state_dict:
-        return
+        return [], []
     missing, unexpected = component.load_state_dict(state_dict, strict=False)
     if unexpected_limit is not None and len(unexpected) > unexpected_limit:
         raise RuntimeError(f"{label} weight mismatch too large (unexpected={len(unexpected)}).")
@@ -632,6 +632,70 @@ def _apply_component_state_dict(
     if len(unexpected) > 0 or len(missing) > 0:
         print(f"[Z-Image POC] {label} non-strict load: missing={len(missing)}, unexpected={len(unexpected)}")
     print(f"[Z-Image POC] Loaded {label} from single-file ({len(state_dict)} tensors).")
+    return missing, unexpected
+
+
+def _custom_state_dict_compatibility(state_dict: dict, model_state_dict: dict) -> dict[str, float]:
+    model_keys = set(model_state_dict.keys())
+    total_input = len(state_dict)
+    total_model = len(model_keys)
+    if total_input <= 0 or total_model <= 0:
+        return {
+            "matched": 0.0,
+            "shape_mismatch": 0.0,
+            "unexpected": float(total_input),
+            "match_ratio_input": 0.0,
+            "coverage_ratio_model": 0.0,
+        }
+
+    matched = 0
+    shape_mismatch = 0
+    unexpected = 0
+    for key, tensor in state_dict.items():
+        target = model_state_dict.get(key)
+        if target is None:
+            unexpected += 1
+            continue
+        if tuple(getattr(tensor, "shape", ())) == tuple(getattr(target, "shape", ())):
+            matched += 1
+        else:
+            shape_mismatch += 1
+
+    return {
+        "matched": float(matched),
+        "shape_mismatch": float(shape_mismatch),
+        "unexpected": float(unexpected),
+        "match_ratio_input": float(matched) / float(max(total_input, 1)),
+        "coverage_ratio_model": float(matched) / float(max(total_model, 1)),
+    }
+
+
+def _validate_custom_text_encoder_state_dict(model, state_dict: dict, source_path: str) -> None:
+    model_sd = model.state_dict()
+    stats = _custom_state_dict_compatibility(state_dict, model_sd)
+    matched = int(stats["matched"])
+    shape_mismatch = int(stats["shape_mismatch"])
+    unexpected = int(stats["unexpected"])
+    match_ratio_input = stats["match_ratio_input"]
+    coverage_ratio_model = stats["coverage_ratio_model"]
+    total_input = len(state_dict)
+    total_model = len(model_sd)
+
+    print(
+        "[Z-Image POC] custom text_encoder compatibility: "
+        f"matched={matched}/{total_input} ({match_ratio_input:.2%}), "
+        f"coverage={matched}/{total_model} ({coverage_ratio_model:.2%}), "
+        f"shape_mismatch={shape_mismatch}, unexpected={unexpected}"
+    )
+
+    # Reject low-overlap checkpoints to avoid silent degraded outputs.
+    min_matched = min(256, max(64, int(total_model * 0.35)))
+    if matched < min_matched or match_ratio_input < 0.45 or coverage_ratio_model < 0.30:
+        raise RuntimeError(
+            "Custom text encoder appears incompatible with Z-Image Turbo. "
+            f"Matched {matched}/{total_input} tensors, model coverage {coverage_ratio_model:.2%}. "
+            "Use a matching Qwen3/Z-Image text encoder or remove custom file."
+        )
 
 
 def _remap_state_dict_to_model_keys(state_dict: dict, model_keys: set[str], label: str, verbose: bool = True) -> dict:
@@ -788,9 +852,16 @@ def _build_pipeline_from_single_file_components(
                             external_sd[key] = f.get_tensor(key)
                 model_keys = set(model.state_dict().keys())
                 external_sd = _remap_state_dict_to_model_keys(external_sd, model_keys, "text_encoder(custom)")
-                _apply_component_state_dict(model, external_sd, label="text_encoder(custom)")
+                _validate_custom_text_encoder_state_dict(model, external_sd, custom_text_encoder_path)
+                _apply_component_state_dict(
+                    model,
+                    external_sd,
+                    label="text_encoder(custom)",
+                    missing_limit=max(256, int(len(model_keys) * 0.45)),
+                    unexpected_limit=max(256, int(len(model_keys) * 0.45)),
+                )
             except Exception as e:
-                print(f"[Z-Image POC] Failed custom text_encoder load from {custom_text_encoder_path}: {e}")
+                raise RuntimeError(f"Failed custom text_encoder load from {custom_text_encoder_path}: {e}") from e
 
         if hasattr(model, "to"):
             model = model.to(dtype=dtype)
