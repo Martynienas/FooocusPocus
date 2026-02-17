@@ -54,7 +54,7 @@ def _recommended_xformers_for_torch() -> str | None:
         "2.5.1": "xformers==0.0.29.post1",
         "2.6.0": "xformers==0.0.29.post2",
         "2.9.0": "xformers==0.0.33.post1",
-        "2.9.1": "xformers==0.0.33.post1",
+        "2.9.1": "xformers==0.0.33.post2",
         "2.10.0": "xformers==0.0.34",
     }
     return mapping.get(torch_version, None)
@@ -64,6 +64,17 @@ def _version_from_pin(spec: str) -> str | None:
     if "==" not in spec:
         return None
     return spec.split("==", 1)[1].strip() or None
+
+
+def _xformers_runtime_healthy() -> bool:
+    try:
+        import xformers  # noqa: F401
+        # Touch CUDA extension path to catch ABI mismatches early.
+        import xformers.ops  # noqa: F401
+        return True
+    except Exception as e:
+        print(f"xformers runtime check failed: {e}")
+        return False
 
 
 def prepare_environment():
@@ -121,6 +132,10 @@ def prepare_environment():
                             exit(0)
                 elif platform.system() == "Linux":
                     run_pip(f"install -U -I --no-deps {xformers_package}", "xformers")
+
+            if _installed_dist_version("xformers") is not None and not _xformers_runtime_healthy():
+                print("xformers binary is incompatible with current torch/CUDA stack. Uninstalling xformers and continuing with PyTorch attention.")
+                run_pip("uninstall -y xformers", "xformers cleanup")
 
     if REINSTALL_ALL or not requirements_met(requirements_file):
         run_pip(f"install -r \"{requirements_file}\"", "requirements")
