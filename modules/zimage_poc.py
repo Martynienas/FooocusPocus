@@ -178,6 +178,44 @@ def _zimage_xformers_mode() -> str:
     return "auto"
 
 
+def _zimage_attention_backend_mode() -> str:
+    value = os.environ.get("FOOOCUS_ZIMAGE_ATTN_BACKEND", "auto").strip().lower()
+    if value in ("", "auto", "default"):
+        return "auto"
+    if value in ("flash", "flash2", "flash-attn", "flash_attention", "flash_attention_2", "fa2"):
+        return "flash"
+    if value in ("sdpa", "torch", "torch_sdpa"):
+        return "sdpa"
+    if value in ("xformers", "xformer", "xf"):
+        return "xformers"
+    if value in ("native", "none", "off", "disable"):
+        return "native"
+    return "auto"
+
+
+def _zimage_attention_backend_candidates(mode: str, allow_xformers: bool = True) -> list[str]:
+    if mode == "native":
+        return ["native"]
+    if mode == "sdpa":
+        return ["flash_attention_2", "flash_attention", "sdpa", "native"]
+    if mode == "flash":
+        return ["flash_attention_2", "flash_attention", "flash", "sdpa", "native"]
+    if mode == "xformers":
+        return ["xformers", "native"]
+
+    # auto
+    candidates = ["flash_attention_2", "flash_attention", "flash", "sdpa"]
+    if allow_xformers:
+        candidates.append("xformers")
+    candidates.append("native")
+    return candidates
+
+
+def _is_flash_attention_backend(name: str) -> bool:
+    lowered = str(name).strip().lower()
+    return lowered.startswith("flash")
+
+
 def _round_up_to_supported_seq(value: int, max_cap: int) -> int:
     buckets = [32, 64, 96, 128, 160, 192, 256, 384, 512]
     cap = max(32, int(max_cap))
@@ -1340,7 +1378,8 @@ def _choose_memory_mode(device: str, profile: str = "safe") -> tuple[str, float,
         return "full_gpu", total_vram_gb, free_vram_gb, pressure
 
     if profile == "balanced":
-        if total_vram_gb > 0 and total_vram_gb <= 10.0:
+        # 11-12GB cards are still borderline for Z-Image Turbo; default to stricter offload.
+        if total_vram_gb > 0 and total_vram_gb <= 12.0:
             return "sequential_offload", total_vram_gb, free_vram_gb, pressure
         if total_vram_gb > 0 and total_vram_gb <= 16.0:
             return "model_offload", total_vram_gb, free_vram_gb, pressure
@@ -1537,11 +1576,19 @@ def _disable_xformers_for_pipeline(pipeline, reason: str = "") -> bool:
 
 def _maybe_enable_xformers(pipeline, profile: str) -> None:
     mode = _zimage_xformers_mode()
-    if mode == "off":
+    backend_mode = _zimage_attention_backend_mode()
+    explicit_backend = backend_mode != "auto"
+
+    if backend_mode == "native":
+        pipeline._zimage_xformers_enabled = False
+        pipeline._zimage_xformers_strategy = "native"
+        return
+
+    if mode == "off" and backend_mode in ("auto", "xformers"):
         pipeline._zimage_xformers_enabled = False
         pipeline._zimage_xformers_strategy = None
         return
-    if mode == "auto" and profile not in ("balanced", "speed"):
+    if not explicit_backend and mode == "auto" and profile not in ("balanced", "speed"):
         pipeline._zimage_xformers_enabled = False
         pipeline._zimage_xformers_strategy = None
         return
@@ -1552,24 +1599,54 @@ def _maybe_enable_xformers(pipeline, profile: str) -> None:
     if _is_zimage_pipeline(pipeline):
         transformer = getattr(pipeline, "transformer", None)
         if transformer is not None and hasattr(transformer, "set_attention_backend"):
-            try:
-                transformer.set_attention_backend("xformers")
-                pipeline._zimage_xformers_enabled = True
-                pipeline._zimage_xformers_strategy = "dispatch_backend"
-                print(f"[Z-Image POC] Enabled xFormers attention backend for Z-Image (mode={mode}).")
-                return
-            except Exception as e:
-                pipeline._zimage_xformers_enabled = False
-                pipeline._zimage_xformers_strategy = None
-                if mode == "on":
-                    print(f"[Z-Image POC] Failed to enable Z-Image xFormers backend: {e}")
-                return
+            candidates = _zimage_attention_backend_candidates(
+                backend_mode,
+                allow_xformers=(mode != "off"),
+            )
+            print(
+                f"[Z-Image POC] Attention backend probe start: mode={mode}, backend={backend_mode}, "
+                f"candidates={candidates}"
+            )
+            if any(_is_flash_attention_backend(c) for c in candidates):
+                print("[Z-Image POC] Flash attention initiation: probing flash-compatible backends.")
+            last_error = None
+            for candidate in candidates:
+                if _is_flash_attention_backend(candidate):
+                    print(f"[Z-Image POC] Trying flash attention backend '{candidate}'...")
+                try:
+                    transformer.set_attention_backend(candidate)
+                    pipeline._zimage_xformers_enabled = candidate != "native"
+                    pipeline._zimage_xformers_strategy = f"dispatch_backend:{candidate}"
+                    if candidate == "native":
+                        print(
+                            f"[Z-Image POC] Using native attention backend for Z-Image "
+                            f"(mode={mode}, backend={backend_mode})."
+                        )
+                    else:
+                        print(
+                            f"[Z-Image POC] Enabled attention backend '{candidate}' for Z-Image "
+                            f"(mode={mode}, backend={backend_mode})."
+                        )
+                    return
+                except Exception as e:
+                    last_error = e
+                    if _is_flash_attention_backend(candidate):
+                        print(f"[Z-Image POC] Flash attention backend '{candidate}' unavailable: {e}")
+
+            pipeline._zimage_xformers_enabled = False
+            pipeline._zimage_xformers_strategy = None
+            if mode == "on" or explicit_backend:
+                print(
+                    f"[Z-Image POC] Failed to enable requested attention backend "
+                    f"(backend={backend_mode}, mode={mode}): {last_error}"
+                )
+            return
 
         pipeline._zimage_xformers_enabled = False
         pipeline._zimage_xformers_strategy = None
-        if mode == "on":
+        if mode == "on" or explicit_backend:
             print(
-                "[Z-Image POC] xFormers requested but this Z-Image backend lacks "
+                "[Z-Image POC] Accelerated attention requested but this Z-Image backend lacks "
                 "transformer.set_attention_backend(); using native attention."
             )
         return
@@ -1579,6 +1656,15 @@ def _maybe_enable_xformers(pipeline, profile: str) -> None:
             print("[Z-Image POC] xFormers requested but pipeline does not expose xFormers attention API.")
         pipeline._zimage_xformers_enabled = False
         pipeline._zimage_xformers_strategy = None
+        return
+
+    if explicit_backend and backend_mode not in ("xformers",):
+        pipeline._zimage_xformers_enabled = False
+        pipeline._zimage_xformers_strategy = None
+        print(
+            f"[Z-Image POC] Attention backend '{backend_mode}' is only supported on Z-Image dispatcher backends; "
+            "using native attention."
+        )
         return
 
     try:
@@ -2291,12 +2377,12 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
                 break
     source_key_count = len(remapped)
 
-    if component_name == "vae":
-        precheck_ratio = remapped_match_count / float(max(source_key_count, 1))
+    precheck_ratio = remapped_match_count / float(max(source_key_count, 1))
+    if component_name in ("vae", "text_encoder"):
         if precheck_ratio < 0.35:
             print(
-                f"[Z-Image POC] Skipping incompatible vae override file '{os.path.basename(file_path)}' "
-                f"(precheck remap_match={precheck_ratio:.1%}); using model default VAE."
+                f"[Z-Image POC] Skipping incompatible {component_name} override file '{os.path.basename(file_path)}' "
+                f"(precheck remap_match={precheck_ratio:.1%}); using model default {component_name}."
             )
             state_dict.clear()
             remapped.clear()
@@ -2317,6 +2403,15 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
     unexpected_ratio = len(unexpected) / float(max(len(remapped), 1))
     remap_ratio = remapped_match_count / float(max(source_key_count, 1))
     if remap_ratio < 0.65 or missing_ratio > 0.35 or unexpected_ratio > 0.35:
+        if component_name in ("vae", "text_encoder"):
+            print(
+                f"[Z-Image POC] Skipping incompatible {component_name} override file '{os.path.basename(file_path)}' "
+                f"(remap_match={remap_ratio:.1%}, missing={len(missing)} ({missing_ratio:.1%}), "
+                f"unexpected={len(unexpected)} ({unexpected_ratio:.1%})); using model default {component_name}."
+            )
+            state_dict.clear()
+            remapped.clear()
+            return
         raise RuntimeError(
             f"Incompatible {component_name} override file '{os.path.basename(file_path)}': "
             f"remap_match={remap_ratio:.1%}, missing={len(missing)} ({missing_ratio:.1%}), "
@@ -2681,20 +2776,31 @@ def generate_zimage(
     )
     print(
         f"[Z-Image POC] Runtime params: steps={steps}, guidance={guidance_scale}, shift={shift}, "
-        f"max_seq={max_sequence_length}, offload={used_offload}, dtype={getattr(pipeline.transformer, 'dtype', 'n/a')}, "
-        f"profile={profile}"
+        f"size={call_kwargs['width']}x{call_kwargs['height']}, max_seq={max_sequence_length}, offload={used_offload}, "
+        f"dtype={getattr(pipeline.transformer, 'dtype', 'n/a')}, profile={profile}"
     )
 
     output = None
     try:
         retry_caps = []
+        retry_sizes = []
         if flavor == "turbo":
             current_seq = int(call_kwargs.get("max_sequence_length", 256))
             for candidate in (192, 160, 128, 96, 64, 32):
                 if current_seq > candidate:
                     retry_caps.append(candidate)
+            current_w = int(call_kwargs.get("width", width))
+            current_h = int(call_kwargs.get("height", height))
+            for scale in (0.85, 0.75, 0.625):
+                next_w = max(384, int((current_w * scale) // 64) * 64)
+                next_h = max(384, int((current_h * scale) // 64) * 64)
+                if next_w < current_w or next_h < current_h:
+                    pair = (next_w, next_h)
+                    if pair not in retry_sizes:
+                        retry_sizes.append(pair)
 
-        for attempt in range(3):
+        max_attempts = 4 if flavor == "turbo" else 3
+        for attempt in range(max_attempts):
             try:
                 output = _run_pipeline_call(pipeline, call_kwargs)
                 break
@@ -2719,7 +2825,7 @@ def generate_zimage(
 
                 if "out of memory" not in msg or generator_device != "cuda":
                     raise
-                if attempt >= 2:
+                if attempt >= (max_attempts - 1):
                     raise
 
                 print("[Z-Image POC] CUDA OOM detected, retrying with stricter offload mode.")
@@ -2738,6 +2844,7 @@ def generate_zimage(
                 if hasattr(pipeline, "enable_vae_tiling"):
                     pipeline.enable_vae_tiling()
 
+                lowered = False
                 if retry_caps:
                     next_cap = retry_caps.pop(0)
                     call_kwargs["max_sequence_length"] = next_cap
@@ -2745,7 +2852,16 @@ def generate_zimage(
                     print(
                         f"[Z-Image POC] Retrying with reduced max_sequence_length={next_cap} for lower VRAM usage."
                     )
-                else:
+                    lowered = True
+                if retry_sizes:
+                    next_w, next_h = retry_sizes.pop(0)
+                    call_kwargs["width"] = next_w
+                    call_kwargs["height"] = next_h
+                    print(
+                        f"[Z-Image POC] Retrying with reduced resolution {next_w}x{next_h} for lower VRAM usage."
+                    )
+                    lowered = True
+                if not lowered:
                     print("[Z-Image POC] Retrying with same sequence length after memory cleanup.")
                 continue
 
