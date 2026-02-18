@@ -926,17 +926,6 @@ def worker():
             print(f'[Z-Image POC] Warning: failed to clear standard prompt cache: {e}')
 
         try:
-            # Drop references to currently active non-Z-Image pipeline objects.
-            pipeline.final_unet = None
-            pipeline.final_clip = None
-            pipeline.final_vae = None
-            pipeline.final_refiner_unet = None
-            pipeline.final_refiner_vae = None
-            pipeline.final_expansion = None
-        except Exception as e:
-            print(f'[Z-Image POC] Warning: failed to clear standard pipeline refs: {e}')
-
-        try:
             ldm_patched.modules.model_management.unload_all_models()
             ldm_patched.modules.model_management.soft_empty_cache(force=True)
             print('[Z-Image POC] Standard model unload complete.')

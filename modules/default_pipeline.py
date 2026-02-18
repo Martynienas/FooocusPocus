@@ -215,7 +215,10 @@ def set_clip_skip(clip_skip: int):
 @torch.no_grad()
 @torch.inference_mode()
 def clear_all_caches():
-    final_clip.fcs_cond_cache = {}
+    if final_clip is None:
+        return
+    if hasattr(final_clip, "fcs_cond_cache"):
+        final_clip.fcs_cond_cache = {}
 
 
 @torch.no_grad()
@@ -224,6 +227,8 @@ def prepare_text_encoder(async_call=True):
     if async_call:
         # TODO: make sure that this is always called in an async way so that users cannot feel it.
         pass
+    if final_clip is None:
+        return
     assert_model_integrity()
     patchers = [final_clip.patcher]
     if final_expansion is not None and getattr(final_expansion, "patcher", None) is not None:
