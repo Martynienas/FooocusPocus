@@ -236,6 +236,31 @@ def _zimage_stage_timers_enabled() -> bool:
     return _truthy_env("FOOOCUS_ZIMAGE_STAGE_TIMERS", "0")
 
 
+def _zimage_allow_quality_fallback() -> bool:
+    return _truthy_env("FOOOCUS_ZIMAGE_ALLOW_QUALITY_FALLBACK", "0")
+
+
+def _zimage_reserved_vram_gb(total_vram_gb: float = 0.0) -> float:
+    raw = os.environ.get("FOOOCUS_ZIMAGE_RESERVE_VRAM_GB", "").strip()
+    if raw:
+        try:
+            reserve = max(0.0, float(raw))
+            return reserve
+        except Exception:
+            _warn_once_env(
+                "FOOOCUS_ZIMAGE_RESERVE_VRAM_GB",
+                f"[Z-Image POC] Ignoring invalid FOOOCUS_ZIMAGE_RESERVE_VRAM_GB='{raw}'.",
+            )
+
+    # Mirror Comfy defaults.
+    if os.name == "nt":
+        reserve = 0.6
+        if total_vram_gb >= 15.0:
+            reserve += 0.1
+        return reserve
+    return 0.4
+
+
 def _format_timing_ms(value: Optional[float]) -> str:
     if value is None:
         return "n/a"
@@ -1692,8 +1717,10 @@ def _preflight_generation_memory_mode(
         use_cfg=use_cfg,
         flavor=flavor,
     )
+    reserve_vram_gb = _zimage_reserved_vram_gb(total_vram_gb=total_vram_gb)
     headroom_gb = {"safe": 1.75, "balanced": 1.35, "speed": 0.95}.get(profile, 1.35)
-    gap_gb = free_vram_gb - estimated_need_gb
+    usable_free_gb = max(0.0, free_vram_gb - reserve_vram_gb)
+    gap_gb = usable_free_gb - estimated_need_gb
 
     if forced_mode is None:
         if gap_gb < max(0.35, headroom_gb * 0.50):
@@ -1728,7 +1755,8 @@ def _preflight_generation_memory_mode(
     forced_suffix = f", forced={forced_mode}" if forced_mode is not None else ""
     print(
         f"[Z-Image POC] Preflight VRAM budget: est={estimated_need_gb:.2f}GB, "
-        f"free={free_vram_gb:.2f}GB, gap={gap_gb:.2f}GB, base={base_mode}, "
+        f"free={free_vram_gb:.2f}GB, reserve={reserve_vram_gb:.2f}GB, usable={usable_free_gb:.2f}GB, "
+        f"gap={gap_gb:.2f}GB, base={base_mode}, "
         f"active={getattr(pipeline, '_zimage_memory_mode', 'unset')}{forced_suffix}."
     )
     return generator_device, used_offload
@@ -2914,6 +2942,7 @@ def generate_zimage(
 
     max_sequence_length = 256 if flavor == "turbo" else 512
     use_cfg = guidance_scale > 1.0
+    allow_quality_fallback = _zimage_allow_quality_fallback()
 
     hard_cap = max_sequence_length
     if flavor == "turbo":
@@ -2925,6 +2954,9 @@ def generate_zimage(
             except Exception:
                 pass
     forced_max_seq = getattr(pipeline, "_zimage_forced_max_sequence_length", None)
+    if (not allow_quality_fallback) and forced_max_seq is not None:
+        forced_max_seq = None
+        pipeline._zimage_forced_max_sequence_length = None
     if forced_max_seq is not None:
         hard_cap = min(hard_cap, int(forced_max_seq))
 
@@ -2939,7 +2971,7 @@ def generate_zimage(
             hard_cap=hard_cap,
         )
 
-    if generator_device == "cuda":
+    if generator_device == "cuda" and allow_quality_fallback:
         free_gb, total_gb = _cuda_mem_info_gb()
         if max_sequence_length > 192 and free_gb > 0 and free_gb < 0.40:
             max_sequence_length = 192
@@ -3036,7 +3068,7 @@ def generate_zimage(
     try:
         retry_caps = []
         retry_sizes = []
-        if flavor == "turbo":
+        if flavor == "turbo" and allow_quality_fallback:
             current_seq = int(call_kwargs.get("max_sequence_length", 256))
             for candidate in (192, 160, 128, 96, 64, 32):
                 if current_seq > candidate:
@@ -3051,7 +3083,7 @@ def generate_zimage(
                     if pair not in retry_sizes:
                         retry_sizes.append(pair)
 
-        max_attempts = 4 if flavor == "turbo" else 3
+        max_attempts = 4 if (flavor == "turbo" and allow_quality_fallback) else (2 if flavor == "turbo" else 3)
         for attempt in range(max_attempts):
             generation_attempts = attempt + 1
             try:
@@ -3097,25 +3129,28 @@ def generate_zimage(
                 if hasattr(pipeline, "enable_vae_tiling"):
                     pipeline.enable_vae_tiling()
 
-                lowered = False
-                if retry_caps:
-                    next_cap = retry_caps.pop(0)
-                    call_kwargs["max_sequence_length"] = next_cap
-                    pipeline._zimage_forced_max_sequence_length = next_cap
-                    print(
-                        f"[Z-Image POC] Retrying with reduced max_sequence_length={next_cap} for lower VRAM usage."
-                    )
-                    lowered = True
-                if retry_sizes:
-                    next_w, next_h = retry_sizes.pop(0)
-                    call_kwargs["width"] = next_w
-                    call_kwargs["height"] = next_h
-                    print(
-                        f"[Z-Image POC] Retrying with reduced resolution {next_w}x{next_h} for lower VRAM usage."
-                    )
-                    lowered = True
-                if not lowered:
-                    print("[Z-Image POC] Retrying with same sequence length after memory cleanup.")
+                if allow_quality_fallback:
+                    lowered = False
+                    if retry_caps:
+                        next_cap = retry_caps.pop(0)
+                        call_kwargs["max_sequence_length"] = next_cap
+                        pipeline._zimage_forced_max_sequence_length = next_cap
+                        print(
+                            f"[Z-Image POC] Retrying with reduced max_sequence_length={next_cap} for lower VRAM usage."
+                        )
+                        lowered = True
+                    if retry_sizes:
+                        next_w, next_h = retry_sizes.pop(0)
+                        call_kwargs["width"] = next_w
+                        call_kwargs["height"] = next_h
+                        print(
+                            f"[Z-Image POC] Retrying with reduced resolution {next_w}x{next_h} for lower VRAM usage."
+                        )
+                        lowered = True
+                    if not lowered:
+                        print("[Z-Image POC] Retrying with same sequence length after memory cleanup.")
+                else:
+                    print("[Z-Image POC] Retrying with same quality settings after memory cleanup.")
                 continue
 
         if output is None:
