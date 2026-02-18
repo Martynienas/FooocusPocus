@@ -1004,20 +1004,39 @@ def _remap_state_dict_to_model_keys(state_dict: dict, model_keys: set[str], labe
         "transformer.",
         "model.",
     ]
+    quant_side_suffixes = (
+        ".comfy_quant",
+        ".weight_scale",
+        ".weight_scale_2",
+        ".input_scale",
+        ".scale_input",
+        ".scale_weight",
+    )
+
+    def _map_primary(src_key: str) -> Optional[str]:
+        if src_key in model_keys:
+            return src_key
+        for pref in strip_prefixes[1:]:
+            if src_key.startswith(pref):
+                cand = src_key[len(pref):]
+                if cand in model_keys:
+                    return cand
+        return None
 
     remapped = {}
     matched = 0
     for src_key, value in state_dict.items():
-        dst_key = None
-        if src_key in model_keys:
-            dst_key = src_key
-        else:
-            for pref in strip_prefixes[1:]:
-                if src_key.startswith(pref):
-                    cand = src_key[len(pref):]
-                    if cand in model_keys:
-                        dst_key = cand
-                        break
+        dst_key = _map_primary(src_key)
+        if dst_key is None:
+            for suffix in quant_side_suffixes:
+                if not src_key.endswith(suffix):
+                    continue
+                base_key = src_key[: -len(suffix)]
+                mapped_weight = _map_primary(f"{base_key}.weight")
+                if mapped_weight is None or not mapped_weight.endswith(".weight"):
+                    continue
+                dst_key = mapped_weight[: -len(".weight")] + suffix
+                break
 
         if dst_key is not None:
             remapped[dst_key] = value
@@ -1741,6 +1760,15 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
         else:
             raise RuntimeError(f"Unsupported override weights format: {file_path}")
 
+    quant_side_suffixes = (
+        ".comfy_quant",
+        ".weight_scale",
+        ".weight_scale_2",
+        ".input_scale",
+        ".scale_input",
+        ".scale_weight",
+    )
+
     def _decode_fp4_e2m1_packed_u8(packed: torch.Tensor) -> torch.Tensor:
         # Comfy packs two fp4 values per byte as:
         # packed = (fp4_even << 4) | fp4_odd
@@ -1784,6 +1812,298 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
             return json.loads(raw.detach().cpu().numpy().tobytes().decode("utf-8"))
         except Exception:
             return None
+
+    class _ComfyRuntimeQuantLinear(torch.nn.Module):
+        def __init__(self, in_features: int, out_features: int, bias: bool = True, compute_dtype=torch.bfloat16):
+            super().__init__()
+            self.in_features = in_features
+            self.out_features = out_features
+            self.compute_dtype = compute_dtype
+            self.quant_format: Optional[str] = None
+            self.full_precision_mm = False
+
+            if bias:
+                self.bias = torch.nn.Parameter(torch.empty(out_features, dtype=compute_dtype), requires_grad=False)
+            else:
+                self.register_parameter("bias", None)
+
+            self.register_buffer("_dense_weight", None, persistent=False)
+            self.register_buffer("_quant_weight", None, persistent=False)
+            self.register_buffer("_weight_scale", None, persistent=False)
+            self.register_buffer("_weight_scale_2", None, persistent=False)
+            self.register_buffer("_input_scale", None, persistent=False)
+
+            self.register_buffer("_cached_weight", None, persistent=False)
+            self._cached_weight_device: Optional[str] = None
+            self._cached_weight_dtype: Optional[str] = None
+
+        @classmethod
+        def from_linear(cls, linear_module: torch.nn.Linear):
+            compute_dtype = getattr(linear_module.weight, "dtype", torch.bfloat16)
+            layer = cls(
+                in_features=linear_module.in_features,
+                out_features=linear_module.out_features,
+                bias=linear_module.bias is not None,
+                compute_dtype=compute_dtype,
+            )
+            if linear_module.bias is not None:
+                layer.bias.data.copy_(linear_module.bias.detach())
+            layer._dense_weight = linear_module.weight.detach()
+            return layer
+
+        def _clear_cache(self):
+            self._cached_weight = None
+            self._cached_weight_device = None
+            self._cached_weight_dtype = None
+
+        def _cache_enabled(self) -> bool:
+            return _truthy_env("FOOOCUS_ZIMAGE_COMFY_RUNTIME_CACHE", "0")
+
+        def _set_dense_weight(self, weight: torch.Tensor):
+            self.quant_format = None
+            self._dense_weight = weight.detach()
+            self._quant_weight = None
+            self._weight_scale = None
+            self._weight_scale_2 = None
+            self._input_scale = None
+            self.full_precision_mm = False
+            self._clear_cache()
+
+        def _set_quant_state(
+            self,
+            fmt: str,
+            weight: torch.Tensor,
+            weight_scale: Optional[torch.Tensor],
+            weight_scale_2: Optional[torch.Tensor],
+            input_scale: Optional[torch.Tensor],
+            full_precision_mm: bool,
+        ):
+            self.quant_format = fmt
+            self.full_precision_mm = full_precision_mm
+            self._quant_weight = weight.detach()
+            self._weight_scale = None if weight_scale is None else weight_scale.detach()
+            self._weight_scale_2 = None if weight_scale_2 is None else weight_scale_2.detach()
+            self._input_scale = None if input_scale is None else input_scale.detach()
+            self._dense_weight = None
+            self._clear_cache()
+
+        def _load_from_state_dict(
+            self,
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        ):
+            weight_key = f"{prefix}weight"
+            bias_key = f"{prefix}bias"
+            comfy_quant_key = f"{prefix}comfy_quant"
+            weight_scale_key = f"{prefix}weight_scale"
+            weight_scale_2_key = f"{prefix}weight_scale_2"
+            input_scale_key = f"{prefix}input_scale"
+            scale_input_key = f"{prefix}scale_input"
+            scale_weight_key = f"{prefix}scale_weight"
+
+            weight = state_dict.pop(weight_key, None)
+            bias = state_dict.pop(bias_key, None)
+            comfy_quant_raw = state_dict.pop(comfy_quant_key, None)
+            weight_scale = state_dict.pop(weight_scale_key, None)
+            weight_scale_2 = state_dict.pop(weight_scale_2_key, None)
+            input_scale = state_dict.pop(input_scale_key, None)
+            if input_scale is None:
+                input_scale = state_dict.pop(scale_input_key, None)
+            state_dict.pop(scale_weight_key, None)
+
+            if bias is not None and self.bias is not None:
+                self.bias.data = bias.detach().to(device=self.bias.device, dtype=self.bias.dtype)
+
+            layer_conf = _decode_comfy_quant_entry(comfy_quant_raw) if comfy_quant_raw is not None else None
+
+            if layer_conf is None:
+                if weight is not None:
+                    self._set_dense_weight(weight.to(dtype=self.compute_dtype))
+                return
+
+            if weight is None:
+                raise RuntimeError(f"Quantized layer at '{prefix}' is missing weight tensor.")
+
+            fmt = str(layer_conf.get("format", "")).lower()
+            if fmt not in ("float8_e4m3fn", "float8_e5m2", "nvfp4"):
+                raise RuntimeError(f"Unsupported Comfy quant format '{fmt}' for layer '{prefix}'.")
+
+            full_precision_mm = bool(layer_conf.get("full_precision_matrix_mult", False))
+            self._set_quant_state(
+                fmt=fmt,
+                weight=weight,
+                weight_scale=weight_scale,
+                weight_scale_2=weight_scale_2,
+                input_scale=input_scale,
+                full_precision_mm=full_precision_mm,
+            )
+
+        def _dequantize_weight(self, device, dtype):
+            if self.quant_format is None:
+                if self._dense_weight is None:
+                    raise RuntimeError("Dense weight is unavailable.")
+                return self._dense_weight.to(device=device, dtype=dtype)
+
+            if self.quant_format in ("float8_e4m3fn", "float8_e5m2"):
+                if self._quant_weight is None:
+                    raise RuntimeError("FP8 quantized weight is unavailable.")
+                weight = self._quant_weight.to(device=device).float()
+                if self._weight_scale is not None:
+                    weight = weight * self._weight_scale.to(device=device).float()
+                return weight.to(dtype=dtype)
+
+            if self.quant_format == "nvfp4":
+                if self._quant_weight is None or self._weight_scale is None or self._weight_scale_2 is None:
+                    raise RuntimeError("NVFP4 quantized weight/scales are unavailable.")
+                deq_values = _decode_fp4_e2m1_packed_u8(self._quant_weight.to(device=device))
+                block_scale = _from_blocked_scales(self._weight_scale.to(device=device).float())
+                expanded_scale = block_scale.repeat_interleave(16, dim=1) * self._weight_scale_2.to(device=device).float()
+                if deq_values.shape != expanded_scale.shape:
+                    raise RuntimeError(
+                        f"NVFP4 shape mismatch in runtime linear: values={tuple(deq_values.shape)} "
+                        f"scales={tuple(expanded_scale.shape)}"
+                    )
+                return (deq_values * expanded_scale).to(dtype=dtype)
+
+            raise RuntimeError(f"Unknown quant format '{self.quant_format}'.")
+
+        def _try_fp8_direct_linear(self, x: torch.Tensor):
+            if self.quant_format not in ("float8_e4m3fn", "float8_e5m2"):
+                return None
+            if self.full_precision_mm:
+                return None
+            if self._quant_weight is None:
+                return None
+
+            try:
+                weight = self._quant_weight.to(device=x.device)
+                output = torch.nn.functional.linear(x, weight, None)
+                scale = self._weight_scale
+                if scale is not None:
+                    scale = scale.to(device=x.device, dtype=output.dtype)
+                    if scale.ndim == 0:
+                        output = output * scale
+                    elif scale.ndim == 1 and scale.shape[0] == self.out_features:
+                        output = output * scale.view(1, -1)
+                    elif scale.ndim == 2 and scale.shape == (self.out_features, 1):
+                        output = output * scale.view(1, -1)
+                    else:
+                        return None
+
+                if self.bias is not None:
+                    output = output + self.bias.to(device=x.device, dtype=output.dtype)
+                return output
+            except Exception:
+                return None
+
+        def _runtime_weight(self, x: torch.Tensor):
+            dtype = x.dtype if x.dtype in (torch.float16, torch.bfloat16, torch.float32) else self.compute_dtype
+            device_key = str(x.device)
+            dtype_key = str(dtype)
+            if self._cache_enabled():
+                if (
+                    self._cached_weight is not None
+                    and self._cached_weight_device == device_key
+                    and self._cached_weight_dtype == dtype_key
+                ):
+                    return self._cached_weight
+
+            weight = self._dequantize_weight(device=x.device, dtype=dtype)
+            if self._cache_enabled():
+                self._cached_weight = weight
+                self._cached_weight_device = device_key
+                self._cached_weight_dtype = dtype_key
+            return weight
+
+        def forward(self, input: torch.Tensor):
+            input_shape = input.shape
+            x = input.reshape(-1, input_shape[-1]) if input.ndim > 2 else input
+            compute_dtype = x.dtype if x.dtype in (torch.float16, torch.bfloat16, torch.float32) else self.compute_dtype
+            x = x.to(dtype=compute_dtype)
+
+            output = self._try_fp8_direct_linear(x)
+            if output is None:
+                weight = self._runtime_weight(x)
+                bias = self.bias.to(device=x.device, dtype=compute_dtype) if self.bias is not None else None
+                output = torch.nn.functional.linear(x, weight, bias)
+
+            if input.ndim > 2:
+                output = output.reshape(*input_shape[:-1], self.out_features)
+            return output
+
+    def _resolve_module(root_module, module_path: str):
+        current = root_module
+        for part in module_path.split("."):
+            if part.isdigit():
+                current = current[int(part)]
+            else:
+                current = getattr(current, part)
+        return current
+
+    def _set_module(root_module, module_path: str, new_module):
+        parts = module_path.split(".")
+        current = root_module
+        for part in parts[:-1]:
+            if part.isdigit():
+                current = current[int(part)]
+            else:
+                current = getattr(current, part)
+        leaf = parts[-1]
+        if leaf.isdigit():
+            current[int(leaf)] = new_module
+        else:
+            setattr(current, leaf, new_module)
+
+    def _install_comfy_runtime_quant_modules(component_module, remapped_sd: dict) -> dict:
+        bases = sorted(
+            {
+                key[: -len(".comfy_quant")]
+                for key in remapped_sd.keys()
+                if key.endswith(".comfy_quant") and f"{key[: -len('.comfy_quant')]}.weight" in remapped_sd
+            }
+        )
+        if not bases:
+            return {"layers": 0, "replaced": 0, "skipped": 0, "float8": 0, "nvfp4": 0}
+
+        replaced = 0
+        skipped = 0
+        float8_layers = 0
+        nvfp4_layers = 0
+        for base in bases:
+            conf = _decode_comfy_quant_entry(remapped_sd.get(f"{base}.comfy_quant"))
+            fmt = str(conf.get("format", "")).lower() if isinstance(conf, dict) else ""
+            if fmt in ("float8_e4m3fn", "float8_e5m2"):
+                float8_layers += 1
+            elif fmt == "nvfp4":
+                nvfp4_layers += 1
+
+            try:
+                target = _resolve_module(component_module, base)
+            except Exception:
+                skipped += 1
+                continue
+
+            if isinstance(target, _ComfyRuntimeQuantLinear):
+                replaced += 1
+                continue
+            if not isinstance(target, torch.nn.Linear):
+                skipped += 1
+                continue
+            _set_module(component_module, base, _ComfyRuntimeQuantLinear.from_linear(target))
+            replaced += 1
+
+        return {
+            "layers": len(bases),
+            "replaced": replaced,
+            "skipped": skipped,
+            "float8": float8_layers,
+            "nvfp4": nvfp4_layers,
+        }
 
     def _dequantize_comfy_mixed_weights(sd: dict) -> tuple[dict, dict]:
         quant_entries = {}
@@ -1836,37 +2156,78 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
                 raise RuntimeError(f"Unsupported Comfy quant format '{fmt}' in '{base}'.")
 
             # Remove quant side tensors after dequantization.
-            for suffix in (".comfy_quant", ".weight_scale", ".weight_scale_2", ".input_scale", ".scale_input", ".scale_weight"):
+            for suffix in quant_side_suffixes:
                 converted.pop(f"{base}{suffix}", None)
 
         # Remove legacy global scaled-fp8 marker if present.
         converted.pop("scaled_fp8", None)
         return converted, stats
 
-    state_dict, quant_stats = _dequantize_comfy_mixed_weights(state_dict)
-    if quant_stats.get("layers", 0) > 0:
-        print(
-            f"[Z-Image POC] Dequantized Comfy mixed weights for {component_name}: "
-            f"layers={quant_stats['layers']}, fp8={quant_stats['float8']}, nvfp4={quant_stats['nvfp4']}."
-        )
-
     model_keys = set(component.state_dict().keys())
-    source_key_count = len(state_dict)
+    probe_source_key_count = len(state_dict)
     direct_match_count = 0
     for key in state_dict.keys():
         if key in model_keys:
             direct_match_count += 1
     print(
         f"[Z-Image POC] {component_name} file override key probe: "
-        f"source={source_key_count}, direct_matches={direct_match_count}, model_keys={len(model_keys)}"
+        f"source={probe_source_key_count}, direct_matches={direct_match_count}, model_keys={len(model_keys)}"
     )
-    remapped = _remap_state_dict_to_model_keys(
-        state_dict,
-        model_keys,
-        f"{component_name}-file-override",
-        verbose=True,
+    remapped = None
+    runtime_quant_enabled = (
+        component_name == "text_encoder"
+        and _truthy_env("FOOOCUS_ZIMAGE_COMFY_RUNTIME_QUANT", "1")
     )
-    remapped_match_count = sum(1 for key in remapped.keys() if key in model_keys)
+    runtime_stats = {"layers": 0, "replaced": 0, "skipped": 0, "float8": 0, "nvfp4": 0}
+    if runtime_quant_enabled:
+        remapped_candidate = _remap_state_dict_to_model_keys(
+            state_dict,
+            model_keys,
+            f"{component_name}-file-override-runtime",
+            verbose=True,
+        )
+        runtime_stats = _install_comfy_runtime_quant_modules(component, remapped_candidate)
+        if runtime_stats["layers"] > 0 and runtime_stats["replaced"] >= runtime_stats["layers"]:
+            remapped = remapped_candidate
+            print(
+                f"[Z-Image POC] Runtime Comfy quant enabled for {component_name}: "
+                f"layers={runtime_stats['layers']}, fp8={runtime_stats['float8']}, "
+                f"nvfp4={runtime_stats['nvfp4']}."
+            )
+        elif runtime_stats["layers"] > 0:
+            print(
+                f"[Z-Image POC] Runtime Comfy quant partially mapped for {component_name} "
+                f"(replaced={runtime_stats['replaced']}/{runtime_stats['layers']}); "
+                "falling back to eager dequantization."
+            )
+
+    if remapped is None:
+        state_dict, quant_stats = _dequantize_comfy_mixed_weights(state_dict)
+        if quant_stats.get("layers", 0) > 0:
+            print(
+                f"[Z-Image POC] Dequantized Comfy mixed weights for {component_name}: "
+                f"layers={quant_stats['layers']}, fp8={quant_stats['float8']}, nvfp4={quant_stats['nvfp4']}."
+            )
+        remapped = _remap_state_dict_to_model_keys(
+            state_dict,
+            model_keys,
+            f"{component_name}-file-override",
+            verbose=True,
+        )
+
+    remapped_match_count = 0
+    for key in remapped.keys():
+        if key in model_keys:
+            remapped_match_count += 1
+            continue
+        for suffix in quant_side_suffixes:
+            if key.endswith(suffix):
+                weight_key = f"{key[: -len(suffix)]}.weight"
+                if weight_key in model_keys:
+                    remapped_match_count += 1
+                break
+    source_key_count = len(remapped)
+
     missing, unexpected = _apply_component_state_dict(
         component,
         remapped,
