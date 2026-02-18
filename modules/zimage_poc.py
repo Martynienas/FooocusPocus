@@ -341,6 +341,58 @@ def list_zimage_component_entries(component_name: str, checkpoint_folders: list[
     return sorted(results, key=str.casefold)
 
 
+def _human_component_path(path: str, checkpoint_folders: list[str]) -> str:
+    path_abs = os.path.abspath(path)
+    roots = [_universal_zimage_root()] + list(checkpoint_folders or [])
+    for root in roots:
+        if not root:
+            continue
+        root_abs = os.path.abspath(root)
+        prefix = root_abs + os.sep
+        if path_abs.startswith(prefix):
+            return os.path.relpath(path_abs, root_abs)
+    return path_abs
+
+
+def _component_weight_files(component_dir: str) -> list[str]:
+    files = []
+    try:
+        with os.scandir(component_dir) as entries:
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                name = entry.name.lower()
+                if name.endswith(".safetensors") or name.endswith(".bin") or name.endswith(".pt") or name.endswith(".pth"):
+                    files.append(entry.name)
+    except Exception:
+        return []
+    return sorted(files, key=str.casefold)
+
+
+def list_zimage_component_choices(component_name: str, checkpoint_folders: list[str]) -> list[tuple[str, str]]:
+    entries = list_zimage_component_entries(component_name, checkpoint_folders)
+    choices = []
+    label_counts = {}
+    for entry in entries:
+        rel = _human_component_path(entry, checkpoint_folders)
+        weight_files = _component_weight_files(entry)
+        if weight_files:
+            preview = ", ".join(weight_files[:2])
+            if len(weight_files) > 2:
+                preview += f" +{len(weight_files) - 2} more"
+            label = f"{rel} [{preview}]"
+        else:
+            label = rel
+
+        if label in label_counts:
+            label_counts[label] += 1
+            label = f"{label} ({label_counts[label]})"
+        else:
+            label_counts[label] = 1
+        choices.append((label, os.path.abspath(entry)))
+    return choices
+
+
 def resolve_zimage_component_path(
     selection: Optional[str],
     component_name: str,
