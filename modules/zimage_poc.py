@@ -1732,13 +1732,31 @@ def _preflight_generation_memory_mode(
 
     current_mode = getattr(pipeline, "_zimage_memory_mode", "unset")
     should_reapply_mode = _memory_mode_rank(target_mode) > _memory_mode_rank(current_mode)
+    allow_relax = False
+
+    # Allow speed profile to recover from a prior OOM-induced sequential offload once
+    # we observe a stable run and enough preflight headroom.
+    if (
+        forced_mode is None
+        and profile == "speed"
+        and current_mode == "sequential_offload"
+        and target_mode == "model_offload"
+        and not bool(getattr(pipeline, "_zimage_last_run_had_oom", False))
+        and gap_gb >= max(headroom_gb, 0.9)
+    ):
+        should_reapply_mode = True
+        allow_relax = True
+
     if forced_mode is not None and target_mode != current_mode:
         should_reapply_mode = True
+        allow_relax = True
 
     if should_reapply_mode:
         reason = f"preflight est={estimated_need_gb:.2f}GB gap={gap_gb:.2f}GB"
         if forced_mode is not None:
             reason = f"forced by env FOOOCUS_ZIMAGE_FORCE_MEMORY_MODE={forced_mode}"
+        elif allow_relax:
+            reason = f"preflight relax est={estimated_need_gb:.2f}GB gap={gap_gb:.2f}GB"
         generator_device, used_offload = _apply_memory_mode(
             pipeline=pipeline,
             device=device,
@@ -1748,7 +1766,7 @@ def _preflight_generation_memory_mode(
             pressure=pressure,
             profile=profile,
             reason=reason,
-            allow_relax=(forced_mode is not None),
+            allow_relax=allow_relax,
         )
         _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
 
@@ -3183,6 +3201,7 @@ def generate_zimage(
         except Exception:
             pass
         had_oom = bool(getattr(pipeline, "_zimage_last_oom", False))
+        pipeline._zimage_last_run_had_oom = had_oom
         if hasattr(pipeline, "_zimage_last_oom"):
             pipeline._zimage_last_oom = False
         if generator_device == "cuda":
