@@ -117,15 +117,6 @@ def sort_enhance_images(images, task):
 def _zit_component_selector_updates(base_model_name, text_encoder_selection, vae_selection):
     auto_choice = modules.zimage_poc.ZIMAGE_COMPONENT_AUTO
 
-    def _choice_values(choices):
-        values = []
-        for choice in choices:
-            if isinstance(choice, (tuple, list)) and len(choice) >= 2:
-                values.append(choice[1])
-            else:
-                values.append(choice)
-        return values
-
     try:
         is_zit, detection_reason = modules.zimage_poc.inspect_zimage_checkpoint_detection(
             base_model_name, modules.config.paths_checkpoints
@@ -134,21 +125,19 @@ def _zit_component_selector_updates(base_model_name, text_encoder_selection, vae
         is_zit = False
         detection_reason = f"detection error: {e}"
 
-    text_encoder_choices = [(auto_choice, auto_choice)]
-    vae_choices = [(auto_choice, auto_choice)]
+    text_encoder_choices = [auto_choice]
+    vae_choices = [auto_choice]
     if is_zit:
         text_encoder_choices += modules.zimage_poc.list_zimage_component_choices(
             "text_encoder", modules.config.paths_checkpoints
         )
         vae_choices += modules.zimage_poc.list_zimage_component_choices("vae", modules.config.paths_checkpoints)
 
-    text_encoder_values = _choice_values(text_encoder_choices)
-    vae_values = _choice_values(vae_choices)
-    text_encoder_value = text_encoder_selection if text_encoder_selection in text_encoder_values else auto_choice
-    vae_value = vae_selection if vae_selection in vae_values else auto_choice
+    text_encoder_value = text_encoder_selection if text_encoder_selection in text_encoder_choices else auto_choice
+    vae_value = vae_selection if vae_selection in vae_choices else auto_choice
     status_text = (
         f"ZIT detection: {'YES' if is_zit else 'NO'} | base model: `{base_model_name}` | "
-        f"{detection_reason} | text encoders: {max(0, len(text_encoder_values) - 1)} | vaes: {max(0, len(vae_values) - 1)}"
+        f"{detection_reason} | text encoders: {max(0, len(text_encoder_choices) - 1)} | vaes: {max(0, len(vae_choices) - 1)}"
     )
     print(f"[ZIT UI] {status_text}")
     return (

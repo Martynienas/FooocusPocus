@@ -369,9 +369,9 @@ def _component_weight_files(component_dir: str) -> list[str]:
     return sorted(files, key=str.casefold)
 
 
-def list_zimage_component_choices(component_name: str, checkpoint_folders: list[str]) -> list[tuple[str, str]]:
+def _zimage_component_choice_pairs(component_name: str, checkpoint_folders: list[str]) -> list[tuple[str, str]]:
     entries = list_zimage_component_entries(component_name, checkpoint_folders)
-    choices = []
+    pairs = []
     label_counts = {}
     for entry in entries:
         rel = _human_component_path(entry, checkpoint_folders)
@@ -389,8 +389,12 @@ def list_zimage_component_choices(component_name: str, checkpoint_folders: list[
             label = f"{label} ({label_counts[label]})"
         else:
             label_counts[label] = 1
-        choices.append((label, os.path.abspath(entry)))
-    return choices
+        pairs.append((label, os.path.abspath(entry)))
+    return pairs
+
+
+def list_zimage_component_choices(component_name: str, checkpoint_folders: list[str]) -> list[str]:
+    return [label for label, _ in _zimage_component_choice_pairs(component_name, checkpoint_folders)]
 
 
 def resolve_zimage_component_path(
@@ -404,6 +408,10 @@ def resolve_zimage_component_path(
 
     if os.path.isabs(selected):
         return os.path.abspath(selected) if _is_valid_component_dir(selected, component_name) else None
+
+    for label, path in _zimage_component_choice_pairs(component_name, checkpoint_folders):
+        if selected == label:
+            return path
 
     for candidate in list_zimage_component_entries(component_name, checkpoint_folders):
         if candidate == selected:
