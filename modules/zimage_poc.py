@@ -449,6 +449,14 @@ def _zimage_allow_quality_fallback() -> bool:
     return _truthy_env("FOOOCUS_ZIMAGE_ALLOW_QUALITY_FALLBACK", "0")
 
 
+def _zimage_preemptive_cuda_cleanup_enabled() -> bool:
+    return _truthy_env("FOOOCUS_ZIMAGE_PREEMPTIVE_CUDA_CLEANUP", "1")
+
+
+def _zimage_preemptive_cuda_cleanup_aggressive() -> bool:
+    return _truthy_env("FOOOCUS_ZIMAGE_PREEMPTIVE_CUDA_CLEANUP_AGGRESSIVE", "0")
+
+
 def _zimage_reserved_vram_gb(total_vram_gb: float = 0.0) -> float:
     raw = os.environ.get("FOOOCUS_ZIMAGE_RESERVE_VRAM_GB", "").strip()
     if raw:
@@ -2249,6 +2257,35 @@ def _should_cleanup_cuda_cache(profile: str, had_oom: bool, pipeline) -> bool:
     return free_gb > 0 and free_gb < 0.5
 
 
+def _maybe_preemptive_cuda_cleanup_before_generation(pipeline, profile: str) -> None:
+    if not _zimage_preemptive_cuda_cleanup_enabled():
+        return
+
+    mode = str(getattr(pipeline, "_zimage_memory_mode", "unset"))
+    if mode not in ("model_offload", "sequential_offload", "full_gpu"):
+        return
+
+    # Keep speed profile light unless explicitly requested.
+    aggressive = _zimage_preemptive_cuda_cleanup_aggressive()
+    if profile != "safe" and not aggressive:
+        aggressive = False
+
+    free_before, total_gb = _cuda_mem_info_gb()
+    try:
+        if hasattr(pipeline, "maybe_free_model_hooks"):
+            pipeline.maybe_free_model_hooks()
+    except Exception:
+        pass
+    _cleanup_memory(cuda=True, aggressive=aggressive)
+    free_after, _ = _cuda_mem_info_gb()
+
+    if free_before > 0 and free_after > 0:
+        print(
+            f"[Z-Image POC] Pre-run CUDA cleanup: free={free_before:.2f}GB->{free_after:.2f}GB "
+            f"(total={total_gb:.2f}GB, mode={mode}, aggressive={aggressive})."
+        )
+
+
 def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
     """
     Returns (generator_device, used_offload_mode).
@@ -3280,6 +3317,9 @@ def generate_zimage(
                 f"[Z-Image POC] Very low free VRAM before generation ({free_gb:.2f}GB/{total_gb:.2f}GB), "
                 "using max_sequence_length=160."
             )
+
+    if generator_device == "cuda":
+        _maybe_preemptive_cuda_cleanup_before_generation(pipeline, profile=profile)
 
     generator_device, used_offload = _preflight_generation_memory_mode(
         pipeline=pipeline,
