@@ -3,6 +3,7 @@ import os
 import hashlib
 import importlib
 import gc
+import re
 from typing import Optional
 
 
@@ -12,10 +13,22 @@ _MAX_PROMPT_CACHE_ITEMS = 32
 _TOKENIZER_JSON_SHA256 = {
     "Tongyi-MAI/Z-Image-Turbo": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
 }
+ZIMAGE_COMPONENT_AUTO = "Auto (use model default)"
 
 
 def _project_root() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _pipeline_cache_key(
+    source_kind: str,
+    source_path: str,
+    text_encoder_override: Optional[str] = None,
+    vae_override: Optional[str] = None,
+) -> str:
+    te = os.path.abspath(text_encoder_override) if text_encoder_override else "-"
+    vae = os.path.abspath(vae_override) if vae_override else "-"
+    return f"{source_kind}:{os.path.abspath(source_path)}:te={te}:vae={vae}"
 
 
 def _clear_prompt_cache_for_pipeline(cache_key: str) -> None:
@@ -63,6 +76,90 @@ def _cuda_mem_info_gb() -> tuple[float, float]:
 
 def _truthy_env(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _iter_safetensors_files(root: str):
+    for dirpath, _, filenames in os.walk(root):
+        for filename in filenames:
+            if filename.endswith(".safetensors"):
+                yield os.path.join(dirpath, filename)
+
+
+def _zimage_fp16_safety_from_safetensors(path: str) -> Optional[bool]:
+    try:
+        import torch
+        from safetensors import safe_open
+    except Exception:
+        return None
+
+    layer_key = re.compile(r"(?:^|\.)layers\.(\d+)\.ffn_norm1\.weight$")
+
+    try:
+        with safe_open(path, framework="pt", device="cpu") as f:
+            candidates = []
+            for key in f.keys():
+                m = layer_key.search(key)
+                if m is not None:
+                    candidates.append((int(m.group(1)), key))
+
+            if not candidates:
+                return None
+
+            candidates.sort(key=lambda x: x[0])
+            # Mirror Neo's heuristic: inspect layer n_layers - 2 (fallback to max layer).
+            target_idx = candidates[-1][0] - 1
+            selected_key = None
+            for idx, key in reversed(candidates):
+                if idx == target_idx:
+                    selected_key = key
+                    break
+            if selected_key is None:
+                selected_key = candidates[-1][1]
+
+            weight = f.get_tensor(selected_key)
+    except Exception:
+        return None
+
+    try:
+        std = torch.std(weight, unbiased=False).item()
+    except Exception:
+        return None
+
+    return bool(std < 0.42)
+
+
+def _detect_zimage_allow_fp16(source_kind: str, source_path: str) -> Optional[bool]:
+    explicit = os.environ.get("FOOOCUS_ZIMAGE_ALLOW_FP16", "").strip().lower()
+    if explicit in ("1", "true", "yes", "on"):
+        return True
+    if explicit in ("0", "false", "no", "off"):
+        return False
+
+    candidates = []
+    if source_kind == "single_file" and source_path.endswith(".safetensors"):
+        candidates = [source_path]
+    elif source_kind == "directory":
+        search_root = os.path.join(source_path, "transformer")
+        if not os.path.isdir(search_root):
+            search_root = source_path
+
+        candidates = sorted(
+            _iter_safetensors_files(search_root),
+            key=lambda p: (
+                0 if "transformer" in p.lower() else 1,
+                0 if os.path.basename(p).startswith("diffusion_pytorch_model") else 1,
+                -os.path.getsize(p) if os.path.isfile(p) else 0,
+            ),
+        )
+
+    for candidate in candidates:
+        safe = _zimage_fp16_safety_from_safetensors(candidate)
+        if safe is not None:
+            status = "safe" if safe else "unsafe"
+            print(f"[Z-Image POC] Detected fp16 as {status} from: {os.path.basename(candidate)}")
+            return safe
+
+    return None
 
 
 def _zimage_perf_profile() -> str:
@@ -196,9 +293,82 @@ def _universal_zimage_root() -> str:
     return os.path.join(_project_root(), "models", "zimage")
 
 
+def _is_valid_component_dir(path: str, component_name: str) -> bool:
+    if not os.path.isdir(path):
+        return False
+    if os.path.isfile(os.path.join(path, "config.json")):
+        return True
+    if component_name == "vae":
+        for filename in ("diffusion_pytorch_model.safetensors", "diffusion_pytorch_model.bin"):
+            if os.path.isfile(os.path.join(path, filename)):
+                return True
+    return False
+
+
+def _iter_component_dirs(root: str, component_name: str):
+    if not root or not os.path.isdir(root):
+        return
+    direct = os.path.join(root, component_name)
+    if os.path.isdir(direct):
+        yield direct
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if not entry.is_dir():
+                    continue
+                nested = os.path.join(entry.path, component_name)
+                if os.path.isdir(nested):
+                    yield nested
+    except Exception:
+        return
+
+
+def list_zimage_component_entries(component_name: str, checkpoint_folders: list[str]) -> list[str]:
+    if component_name not in ("text_encoder", "vae"):
+        return []
+    roots = [_universal_zimage_root()] + list(checkpoint_folders or [])
+    results = []
+    seen = set()
+    for root in roots:
+        for candidate in _iter_component_dirs(root, component_name):
+            normalized = os.path.abspath(candidate)
+            if normalized in seen:
+                continue
+            if not _is_valid_component_dir(normalized, component_name):
+                continue
+            seen.add(normalized)
+            results.append(normalized)
+    return sorted(results, key=str.casefold)
+
+
+def resolve_zimage_component_path(
+    selection: Optional[str],
+    component_name: str,
+    checkpoint_folders: list[str],
+) -> Optional[str]:
+    selected = (selection or "").strip()
+    if not selected or selected == ZIMAGE_COMPONENT_AUTO:
+        return None
+
+    if os.path.isabs(selected):
+        return os.path.abspath(selected) if _is_valid_component_dir(selected, component_name) else None
+
+    for candidate in list_zimage_component_entries(component_name, checkpoint_folders):
+        if candidate == selected:
+            return candidate
+        if os.path.basename(candidate) == selected:
+            return candidate
+        parent = os.path.basename(os.path.dirname(candidate))
+        if selected == f"{parent}/{component_name}" or selected == f"{parent}\\{component_name}":
+            return candidate
+    return None
+
+
 def is_zimage_checkpoint_name(name: str) -> bool:
     lowered = (name or "").lower()
-    return "z-image" in lowered or "zimage" in lowered or "tongyi" in lowered
+    if "z-image" in lowered or "zimage" in lowered or "tongyi" in lowered:
+        return True
+    return re.search(r"(?:^|[^a-z0-9])zit(?:[^a-z0-9]|$)", lowered) is not None
 
 
 def detect_zimage_flavor(name: str) -> str:
@@ -384,17 +554,29 @@ def _is_likely_fp8_single_file(path: str) -> bool:
 
 
 def should_use_zimage_checkpoint(name: str, checkpoint_folders: list[str]) -> bool:
-    if is_zimage_checkpoint_name(name):
-        return True
+    matched, _ = inspect_zimage_checkpoint_detection(name, checkpoint_folders)
+    return matched
 
-    resolved = _resolve_named_path(name, checkpoint_folders)
+
+def inspect_zimage_checkpoint_detection(name: str, checkpoint_folders: list[str]) -> tuple[bool, str]:
+    raw_name = str(name or "")
+    if is_zimage_checkpoint_name(raw_name):
+        return True, "matched checkpoint name pattern"
+
+    resolved = _resolve_named_path(raw_name, checkpoint_folders)
     if resolved is None:
-        return False
+        return False, "could not resolve model path from checkpoint folders"
 
     if os.path.isdir(resolved):
-        return is_zimage_model_directory(resolved)
+        matched = is_zimage_model_directory(resolved)
+        if matched:
+            return True, f"resolved directory detected as Z-Image: {resolved}"
+        return False, f"resolved directory is not a Z-Image model directory: {resolved}"
 
-    return _is_likely_zimage_safetensors(resolved)
+    matched = _is_likely_zimage_safetensors(resolved)
+    if matched:
+        return True, f"resolved safetensors matched Z-Image fingerprint: {resolved}"
+    return False, f"resolved safetensors did not match Z-Image fingerprint: {resolved}"
 
 
 def _find_local_repo_components(flavor: str, checkpoint_folders: list[str]) -> Optional[str]:
@@ -960,10 +1142,11 @@ def resolve_zimage_source(name: str, checkpoint_folders: list[str], auto_downloa
     return None, None, flavor
 
 
-def _pick_device_and_dtype():
+def _pick_device_and_dtype(zimage_allow_fp16: Optional[bool] = None):
     import torch
 
     dtype_override = os.environ.get("FOOOCUS_ZIMAGE_DTYPE", "auto").strip().lower()
+    allow_unsafe_fp16 = _truthy_env("FOOOCUS_ZIMAGE_ALLOW_FP16_UNSAFE", "0")
 
     def _resolve_dtype(value: str):
         if value in ("bf16", "bfloat16"):
@@ -981,9 +1164,15 @@ def _pick_device_and_dtype():
             if requested == torch.bfloat16 and not torch.cuda.is_bf16_supported():
                 print("[Z-Image POC] Requested BF16 but CUDA BF16 is unsupported; falling back to FP16.")
                 return "cuda", torch.float16
+            if requested == torch.float16 and zimage_allow_fp16 is False and not allow_unsafe_fp16:
+                print("[Z-Image POC] Requested FP16 but checkpoint appears fp16-unsafe; falling back to FP32.")
+                return "cuda", torch.float32
             return "cuda", requested
         if torch.cuda.is_bf16_supported():
             return "cuda", torch.bfloat16
+        if zimage_allow_fp16 is False and not allow_unsafe_fp16:
+            print("[Z-Image POC] Checkpoint appears fp16-unsafe; using FP32.")
+            return "cuda", torch.float32
         return "cuda", torch.float16
 
     requested = _resolve_dtype(dtype_override)
@@ -1427,15 +1616,66 @@ def _ensure_zimage_runtime_compatibility() -> None:
         )
 
 
-def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_folders: list[str]):
-    cache_key = f"{source_kind}:{os.path.abspath(source_path)}"
+def _load_component_override(pipeline, component_name: str, component_path: str, dtype) -> None:
+    component_path = os.path.abspath(component_path)
+    component = getattr(pipeline, component_name, None)
+    if component is None:
+        print(f"[Z-Image POC] Pipeline has no '{component_name}' component; ignoring override.")
+        return
+
+    cls = component.__class__
+    kwargs = {
+        "pretrained_model_name_or_path": component_path,
+        "local_files_only": True,
+        "low_cpu_mem_usage": True,
+    }
+    if component_name == "text_encoder":
+        kwargs["trust_remote_code"] = True
+
+    model = _call_with_dtype_compat(
+        cls.from_pretrained,
+        dtype,
+        kwargs,
+        f"{component_name}.override.from_pretrained",
+    )
+    if hasattr(model, "to"):
+        model = model.to(dtype=dtype)
+
+    if hasattr(pipeline, "register_modules"):
+        pipeline.register_modules(**{component_name: model})
+    else:
+        setattr(pipeline, component_name, model)
+    print(f"[Z-Image POC] Using override {component_name}: {component_path}")
+
+
+def _load_pipeline(
+    source_kind: str,
+    source_path: str,
+    flavor: str,
+    checkpoint_folders: list[str],
+    text_encoder_override: Optional[str] = None,
+    vae_override: Optional[str] = None,
+):
+    cache_key = _pipeline_cache_key(
+        source_kind,
+        source_path,
+        text_encoder_override=text_encoder_override,
+        vae_override=vae_override,
+    )
     if cache_key in _PIPELINE_CACHE:
         pipeline, generator_device, used_offload = _PIPELINE_CACHE[cache_key]
         if _pipeline_has_meta_tensors(pipeline):
             print("[Z-Image POC] Cached pipeline has meta tensors, rebuilding pipeline.")
             _PIPELINE_CACHE.pop(cache_key, None)
             _clear_prompt_cache_for_pipeline(cache_key)
-            return _load_pipeline(source_kind, source_path, flavor, checkpoint_folders)
+            return _load_pipeline(
+                source_kind,
+                source_path,
+                flavor,
+                checkpoint_folders,
+                text_encoder_override=text_encoder_override,
+                vae_override=vae_override,
+            )
         current_profile = _zimage_perf_profile()
         cached_profile = getattr(pipeline, "_zimage_perf_profile", "safe")
         if current_profile != cached_profile:
@@ -1455,7 +1695,8 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
         "on",
     )
 
-    device, dtype = _pick_device_and_dtype()
+    zimage_allow_fp16 = _detect_zimage_allow_fp16(source_kind, source_path)
+    device, dtype = _pick_device_and_dtype(zimage_allow_fp16=zimage_allow_fp16)
 
     if source_kind == "directory":
         pipeline = _call_with_dtype_compat(
@@ -1567,6 +1808,11 @@ def _load_pipeline(source_kind: str, source_path: str, flavor: str, checkpoint_f
     if _pipeline_has_meta_tensors(pipeline):
         raise RuntimeError("Z-Image pipeline contains meta tensors after load.")
 
+    if text_encoder_override is not None:
+        _load_component_override(pipeline, "text_encoder", text_encoder_override, dtype)
+    if vae_override is not None:
+        _load_component_override(pipeline, "vae", vae_override, dtype)
+
     pipeline.set_progress_bar_config(disable=True)
     generator_device, used_offload = _prepare_pipeline_memory_mode(pipeline, device)
     _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
@@ -1608,12 +1854,30 @@ def generate_zimage(
     guidance_scale: float,
     seed: int,
     shift: float = 3.0,
+    text_encoder_override: Optional[str] = None,
+    vae_override: Optional[str] = None,
 ):
     import torch
 
-    cache_key = f"{source_kind}:{os.path.abspath(source_path)}"
+    resolved_text_encoder_override = resolve_zimage_component_path(
+        text_encoder_override, "text_encoder", checkpoint_folders
+    )
+    resolved_vae_override = resolve_zimage_component_path(vae_override, "vae", checkpoint_folders)
+    cache_key = _pipeline_cache_key(
+        source_kind,
+        source_path,
+        text_encoder_override=resolved_text_encoder_override,
+        vae_override=resolved_vae_override,
+    )
     profile = _zimage_perf_profile()
-    pipeline, generator_device, used_offload = _load_pipeline(source_kind, source_path, flavor, checkpoint_folders)
+    pipeline, generator_device, used_offload = _load_pipeline(
+        source_kind,
+        source_path,
+        flavor,
+        checkpoint_folders,
+        text_encoder_override=resolved_text_encoder_override,
+        vae_override=resolved_vae_override,
+    )
     if generator_device == "cuda" and _should_cleanup_cuda_cache(profile, had_oom=False, pipeline=pipeline):
         _cleanup_memory(cuda=True, aggressive=False)
 

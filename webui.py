@@ -11,6 +11,7 @@ import modules.html
 import modules.async_worker as worker
 import modules.constants as constants
 import modules.flags as flags
+import modules.zimage_poc
 import modules.gradio_hijack as grh
 import modules.style_sorter as style_sorter
 import modules.style_manager as style_manager
@@ -111,6 +112,38 @@ def sort_enhance_images(images, task):
         walk_index += task.enhance_stats[index]
 
     return sorted_images
+
+
+def _zit_component_selector_updates(base_model_name, text_encoder_selection, vae_selection):
+    auto_choice = modules.zimage_poc.ZIMAGE_COMPONENT_AUTO
+    try:
+        is_zit, detection_reason = modules.zimage_poc.inspect_zimage_checkpoint_detection(
+            base_model_name, modules.config.paths_checkpoints
+        )
+    except Exception as e:
+        is_zit = False
+        detection_reason = f"detection error: {e}"
+
+    text_encoder_choices = [auto_choice]
+    vae_choices = [auto_choice]
+    if is_zit:
+        text_encoder_choices += modules.zimage_poc.list_zimage_component_entries(
+            "text_encoder", modules.config.paths_checkpoints
+        )
+        vae_choices += modules.zimage_poc.list_zimage_component_entries("vae", modules.config.paths_checkpoints)
+
+    text_encoder_value = text_encoder_selection if text_encoder_selection in text_encoder_choices else auto_choice
+    vae_value = vae_selection if vae_selection in vae_choices else auto_choice
+    status_text = (
+        f"ZIT detection: {'YES' if is_zit else 'NO'} | base model: `{base_model_name}` | "
+        f"{detection_reason} | text encoders: {max(0, len(text_encoder_choices) - 1)} | vaes: {max(0, len(vae_choices) - 1)}"
+    )
+    print(f"[ZIT UI] {status_text}")
+    return (
+        gr.update(visible=is_zit, choices=text_encoder_choices, value=text_encoder_value),
+        gr.update(visible=is_zit, choices=vae_choices, value=vae_value),
+        gr.update(value=status_text),
+    )
 
 
 def inpaint_mode_change(mode, inpaint_engine_version):
@@ -848,6 +881,24 @@ with shared.gradio_root:
 
                     refiner_model.change(lambda x: gr.update(visible=x != 'None'),
                                          inputs=refiner_model, outputs=refiner_switch, show_progress=False, queue=False)
+                    with gr.Row():
+                        zit_text_encoder = gr.Dropdown(
+                            label='ZIT Text Encoder',
+                            choices=[modules.zimage_poc.ZIMAGE_COMPONENT_AUTO],
+                            value=modules.zimage_poc.ZIMAGE_COMPONENT_AUTO,
+                            visible=False,
+                            info='Only used for ZIT/Z-Image models.',
+                            show_label=True,
+                        )
+                        zit_vae = gr.Dropdown(
+                            label='ZIT VAE',
+                            choices=[modules.zimage_poc.ZIMAGE_COMPONENT_AUTO],
+                            value=modules.zimage_poc.ZIMAGE_COMPONENT_AUTO,
+                            visible=False,
+                            info='Only used for ZIT/Z-Image models.',
+                            show_label=True,
+                        )
+                    zit_selector_status = gr.Markdown(value='ZIT detection: waiting for model selection...')
 
                 with gr.Group():
                     lora_ctrls = []
@@ -1049,11 +1100,16 @@ with shared.gradio_root:
                 dev_mode.change(dev_mode_checked, inputs=[dev_mode], outputs=[dev_tools],
                                 queue=False, show_progress=False)
 
-                def refresh_files_clicked():
+                def refresh_files_clicked(current_base_model, current_zit_text_encoder, current_zit_vae):
                     modules.config.update_files()
                     results = [gr.update(choices=modules.config.model_filenames)]
                     results += [gr.update(choices=['None'] + modules.config.model_filenames)]
                     results += [gr.update(choices=[flags.default_vae] + modules.config.vae_filenames)]
+                    results += list(
+                        _zit_component_selector_updates(
+                            current_base_model, current_zit_text_encoder, current_zit_vae
+                        )
+                    )
                     if not args_manager.args.disable_preset_selection:
                         results += [gr.update(choices=modules.config.available_presets)]
                     for i in range(modules.config.default_max_lora_number):
@@ -1061,11 +1117,26 @@ with shared.gradio_root:
                                     gr.update(choices=['None', modules.config.random_lora_name] + modules.config.lora_filenames), gr.update()]
                     return results
 
-                refresh_files_output = [base_model, refiner_model, vae_name]
+                refresh_files_output = [base_model, refiner_model, vae_name, zit_text_encoder, zit_vae]
+                refresh_files_output += [zit_selector_status]
                 if not args_manager.args.disable_preset_selection:
                     refresh_files_output += [preset_selection]
-                refresh_files.click(refresh_files_clicked, [], refresh_files_output + lora_ctrls,
+                refresh_files.click(refresh_files_clicked, [base_model, zit_text_encoder, zit_vae], refresh_files_output + lora_ctrls,
                                     queue=False, show_progress=False)
+                base_model.change(
+                    _zit_component_selector_updates,
+                    inputs=[base_model, zit_text_encoder, zit_vae],
+                    outputs=[zit_text_encoder, zit_vae, zit_selector_status],
+                    queue=False,
+                    show_progress=False,
+                )
+                shared.gradio_root.load(
+                    _zit_component_selector_updates,
+                    inputs=[base_model, zit_text_encoder, zit_vae],
+                    outputs=[zit_text_encoder, zit_vae, zit_selector_status],
+                    queue=False,
+                    show_progress=False,
+                )
 
             # =========================================================================
             # Configuration Tab - Manage application configuration
@@ -2255,7 +2326,7 @@ with shared.gradio_root:
         ctrls += [outpaint_selections, inpaint_input_image, inpaint_additional_prompt, inpaint_mask_image]
         ctrls += [disable_preview, disable_intermediate_results, disable_seed_increment, black_out_nsfw]
         ctrls += [adm_scaler_positive, adm_scaler_negative, adm_scaler_end, adaptive_cfg, clip_skip]
-        ctrls += [sampler_name, scheduler_name, vae_name]
+        ctrls += [sampler_name, scheduler_name, vae_name, zit_text_encoder, zit_vae]
         ctrls += [overwrite_step, overwrite_switch, overwrite_width, overwrite_height, overwrite_vary_strength]
         ctrls += [overwrite_upscale_strength, mixing_image_prompt_and_vary_upscale, mixing_image_prompt_and_inpaint]
         ctrls += [debugging_cn_preprocessor, skipping_cn_preprocessor, canny_low_threshold, canny_high_threshold]

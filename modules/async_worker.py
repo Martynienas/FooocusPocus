@@ -68,6 +68,8 @@ class AsyncTask:
         self.sampler_name = args.pop()
         self.scheduler_name = args.pop()
         self.vae_name = args.pop()
+        self.zit_text_encoder = args.pop()
+        self.zit_vae = args.pop()
         self.overwrite_step = args.pop()
         self.overwrite_switch = args.pop()
         self.overwrite_width = args.pop()
@@ -895,11 +897,11 @@ def worker():
         async_task.scheduler_name = 'beta' if 'beta' in flags.scheduler_list else 'sgm_uniform'
         async_task.cfg_scale = 1.0
         # Shift control for Z-Image Turbo.
-        # ComfyUI Turbo workflows commonly run shift=3.0; allow override via env.
+        # Neo preset defaults to shift=9.0; allow override via env.
         try:
-            async_task.adaptive_cfg = float(os.environ.get('FOOOCUS_ZIMAGE_TURBO_SHIFT', '3.0'))
+            async_task.adaptive_cfg = float(os.environ.get('FOOOCUS_ZIMAGE_TURBO_SHIFT', '9.0'))
         except Exception:
-            async_task.adaptive_cfg = 3.0
+            async_task.adaptive_cfg = 9.0
         async_task.sharpness = 0.0
         async_task.refiner_switch = 1.0
         async_task.adm_scaler_positive = 1.0
@@ -970,6 +972,8 @@ def worker():
                     guidance_scale=float(async_task.cfg_scale),
                     seed=task_seed,
                     shift=float(async_task.adaptive_cfg),
+                    text_encoder_override=async_task.zit_text_encoder,
+                    vae_override=async_task.zit_vae,
                 )
                 np_image = np.array(pil_image)
             except ModuleNotFoundError as e:
