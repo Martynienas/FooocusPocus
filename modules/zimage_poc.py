@@ -492,6 +492,23 @@ def _zimage_model_offload_min_gap_gb() -> float:
     return 1.8
 
 
+def _zimage_vram_estimate_scale() -> float:
+    raw = os.environ.get("FOOOCUS_ZIMAGE_VRAM_ESTIMATE_SCALE", "").strip()
+    if raw == "":
+        return 1.0
+    try:
+        value = float(raw)
+        if value <= 0.0:
+            raise ValueError()
+        return min(value, 4.0)
+    except Exception:
+        _warn_once_env(
+            "FOOOCUS_ZIMAGE_VRAM_ESTIMATE_SCALE",
+            f"[Z-Image POC] Ignoring invalid FOOOCUS_ZIMAGE_VRAM_ESTIMATE_SCALE='{raw}'.",
+        )
+        return 1.0
+
+
 def _format_timing_ms(value: Optional[float]) -> str:
     if value is None:
         return "n/a"
@@ -1919,7 +1936,8 @@ def _estimate_generation_vram_need_gb(
     pixel_cost = megapixels * 2.0
     seq_cost = max(0.0, float(max_sequence_length) / 256.0) * 1.2
     cfg_cost = 0.4 if use_cfg else 0.0
-    return base + pixel_cost + seq_cost + cfg_cost
+    estimated = base + pixel_cost + seq_cost + cfg_cost
+    return estimated * _zimage_vram_estimate_scale()
 
 
 def _apply_memory_mode(
@@ -1997,6 +2015,7 @@ def _preflight_generation_memory_mode(
         flavor=flavor,
     )
     reserve_vram_gb = _zimage_reserved_vram_gb(total_vram_gb=total_vram_gb)
+    estimate_scale = _zimage_vram_estimate_scale()
     headroom_gb = {"safe": 1.75, "balanced": 1.35, "speed": 0.95}.get(profile, 1.35)
     usable_free_gb = max(0.0, free_vram_gb - reserve_vram_gb)
     gap_gb = usable_free_gb - estimated_need_gb
@@ -2056,6 +2075,7 @@ def _preflight_generation_memory_mode(
     forced_suffix = f", forced={forced_mode}" if forced_mode is not None else ""
     print(
         f"[Z-Image POC] Preflight VRAM budget: est={estimated_need_gb:.2f}GB, "
+        f"est_scale={estimate_scale:.2f}, "
         f"free={free_vram_gb:.2f}GB, reserve={reserve_vram_gb:.2f}GB, usable={usable_free_gb:.2f}GB, "
         f"gap={gap_gb:.2f}GB, base={base_mode}, "
         f"active={getattr(pipeline, '_zimage_memory_mode', 'unset')}{forced_suffix}."
