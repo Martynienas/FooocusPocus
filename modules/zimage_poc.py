@@ -261,6 +261,20 @@ def _zimage_reserved_vram_gb(total_vram_gb: float = 0.0) -> float:
     return 0.4
 
 
+def _zimage_model_offload_min_gap_gb() -> float:
+    raw = os.environ.get("FOOOCUS_ZIMAGE_MODEL_OFFLOAD_MIN_GAP_GB", "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except Exception:
+            _warn_once_env(
+                "FOOOCUS_ZIMAGE_MODEL_OFFLOAD_MIN_GAP_GB",
+                f"[Z-Image POC] Ignoring invalid FOOOCUS_ZIMAGE_MODEL_OFFLOAD_MIN_GAP_GB='{raw}'.",
+            )
+    # Conservative default for turbo on 10-12GB class cards.
+    return 1.8
+
+
 def _format_timing_ms(value: Optional[float]) -> str:
     if value is None:
         return "n/a"
@@ -1727,6 +1741,10 @@ def _preflight_generation_memory_mode(
             target_mode = "sequential_offload"
         elif gap_gb < headroom_gb:
             target_mode = _stricter_memory_mode(target_mode, "model_offload")
+        if flavor == "turbo" and target_mode == "model_offload":
+            min_gap_for_model_offload = _zimage_model_offload_min_gap_gb()
+            if gap_gb < min_gap_for_model_offload:
+                target_mode = "sequential_offload"
     else:
         target_mode = forced_mode
 
