@@ -26,6 +26,7 @@ from modules.model_loader import load_file_from_url
 
 REINSTALL_ALL = False
 TRY_INSTALL_XFORMERS = True
+TRY_INSTALL_FLASH_ATTN = True
 
 
 def torch_stack_is_compatible(min_torch_version: str = "2.2.0") -> bool:
@@ -125,6 +126,41 @@ def _cleanup_incompatible_xformers() -> None:
         print(f"Best-effort xformers file cleanup skipped: {e}")
 
 
+def _flash_attn_runtime_healthy() -> bool:
+    try:
+        import flash_attn  # noqa: F401
+        return True
+    except Exception as e:
+        print(f"flash-attn runtime check failed: {e}")
+        return False
+
+
+def _flash_attn_install_supported() -> bool:
+    if platform.system() != "Linux":
+        print("flash-attn auto-install is currently enabled only on Linux. Skipping.")
+        return False
+    try:
+        import torch
+        if not torch.cuda.is_available() or getattr(torch.version, "cuda", None) is None:
+            print("CUDA runtime not available; skipping flash-attn auto-install.")
+            return False
+    except Exception as e:
+        print(f"Unable to verify CUDA runtime for flash-attn auto-install: {e}")
+        return False
+    return True
+
+
+def _version_is_lt(installed: str | None, minimum: str | None) -> bool:
+    if not installed or not minimum:
+        return False
+    try:
+        left = packaging.version.parse(installed.split("+", 1)[0])
+        right = packaging.version.parse(minimum.strip())
+        return left < right
+    except Exception:
+        return False
+
+
 def prepare_environment():
     torch_index_url = os.environ.get('TORCH_INDEX_URL', "https://download.pytorch.org/whl/cu128")
     torch_command = os.environ.get('TORCH_COMMAND',
@@ -184,6 +220,40 @@ def prepare_environment():
             if _installed_dist_version("xformers") is not None and not _xformers_runtime_healthy():
                 print("xformers binary is incompatible with current torch/CUDA stack. Uninstalling xformers and continuing with PyTorch attention.")
                 _cleanup_incompatible_xformers()
+
+    if TRY_INSTALL_FLASH_ATTN and _flash_attn_install_supported():
+        flash_attn_package = os.environ.get('FLASH_ATTN_PACKAGE', "flash-attn>=2.6.3").strip()
+        flash_attn_min = os.environ.get('FLASH_ATTN_MIN_VERSION', "2.6.3").strip()
+        flash_attn_force = os.environ.get('FLASH_ATTN_REINSTALL', "").strip().lower() in ("1", "true", "yes", "on")
+
+        installed_flash_attn = _installed_dist_version("flash-attn")
+        need_flash_attn_install = (
+            REINSTALL_ALL
+            or flash_attn_force
+            or installed_flash_attn is None
+            or _version_is_lt(installed_flash_attn, flash_attn_min)
+        )
+
+        if need_flash_attn_install:
+            if installed_flash_attn:
+                print(
+                    f"flash-attn {installed_flash_attn} does not satisfy target >= {flash_attn_min}; "
+                    f"installing {flash_attn_package}."
+                )
+            else:
+                print(f"Installing flash-attn package: {flash_attn_package}.")
+            try:
+                run_pip(f"install -U -I --no-build-isolation {flash_attn_package}", "flash-attn", live=True)
+            except Exception as e:
+                print(f"flash-attn install failed, continuing with fallback attention backends: {e}")
+
+        if _installed_dist_version("flash-attn") is not None and not _flash_attn_runtime_healthy():
+            print("flash-attn package is installed but runtime import failed; continuing with fallback attention backends.")
+
+    if "FOOOCUS_ZIMAGE_ATTN_BACKEND" not in os.environ:
+        # Prefer FlashAttention 2 path by default, with runtime fallback in zimage_poc.
+        os.environ["FOOOCUS_ZIMAGE_ATTN_BACKEND"] = "flash2"
+        print("Set default Z-Image attention backend: FOOOCUS_ZIMAGE_ATTN_BACKEND=flash2")
 
     if REINSTALL_ALL or not requirements_met(requirements_file):
         run_pip(f"install -r \"{requirements_file}\"", "requirements")

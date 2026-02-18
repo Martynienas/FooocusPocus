@@ -216,6 +216,123 @@ def _is_flash_attention_backend(name: str) -> bool:
     return lowered.startswith("flash")
 
 
+def _parse_backend_names_from_error(message: str) -> list[str]:
+    text = str(message or "")
+    m = re.search(r"must be one of the following:\s*(.+)", text, flags=re.IGNORECASE | re.DOTALL)
+    if not m:
+        return []
+    raw = m.group(1).strip().splitlines()[0]
+    items = []
+    for part in raw.split(","):
+        item = part.strip().strip("`'\"")
+        if item:
+            items.append(item)
+    return items
+
+
+def _discover_transformer_attention_backends(transformer) -> list[str]:
+    attrs = (
+        "get_supported_attention_backends",
+        "get_attention_backends",
+        "list_attention_backends",
+        "available_attention_backends",
+        "attention_backends",
+    )
+    for attr in attrs:
+        obj = getattr(transformer, attr, None)
+        if obj is None:
+            continue
+        try:
+            value = obj() if callable(obj) else obj
+        except Exception:
+            continue
+        if isinstance(value, dict):
+            values = list(value.keys())
+        elif isinstance(value, (list, tuple, set)):
+            values = list(value)
+        else:
+            continue
+        result = []
+        for v in values:
+            s = str(v).strip()
+            if s:
+                result.append(s)
+        if result:
+            return result
+    return []
+
+
+def _expand_attention_backend_alias(name: str) -> list[str]:
+    key = str(name).strip().lower()
+    alias_map = {
+        "flash_attention_2": [
+            "flash_attention_2",
+            "flash",
+            "flash_hub",
+            "flash_varlen",
+            "flash_varlen_hub",
+            "_flash_3",
+            "_flash_varlen_3",
+            "_flash_3_hub",
+            "_native_flash",
+        ],
+        "flash_attention": [
+            "flash_attention",
+            "flash",
+            "flash_hub",
+            "flash_varlen",
+            "flash_varlen_hub",
+            "_native_flash",
+        ],
+        "flash": [
+            "flash",
+            "flash_hub",
+            "flash_varlen",
+            "flash_varlen_hub",
+            "_flash_3",
+            "_flash_varlen_3",
+            "_flash_3_hub",
+            "_native_flash",
+        ],
+        "sdpa": [
+            "sdpa",
+            "_native_efficient",
+            "_native_math",
+            "_native_flash",
+            "_native_cudnn",
+            "native",
+        ],
+        "native": [
+            "native",
+            "_native_math",
+            "_native_efficient",
+            "_native_flash",
+            "_native_cudnn",
+        ],
+        "xformers": ["xformers"],
+    }
+    expanded = alias_map.get(key, [key])
+    return list(dict.fromkeys(expanded))
+
+
+def _remap_attention_backend_candidates(candidates: list[str], available: list[str]) -> list[str]:
+    if not available:
+        return candidates
+    available_map = {str(x).strip().lower(): str(x).strip() for x in available if str(x).strip()}
+    remapped = []
+    for candidate in candidates:
+        picked = None
+        for alias in _expand_attention_backend_alias(candidate):
+            if alias in available_map:
+                picked = available_map[alias]
+                break
+        if picked is None:
+            picked = candidate
+        remapped.append(picked)
+    # Keep order while deduping.
+    return list(dict.fromkeys(remapped))
+
+
 def _round_up_to_supported_seq(value: int, max_cap: int) -> int:
     buckets = [32, 64, 96, 128, 160, 192, 256, 384, 512]
     cap = max(32, int(max_cap))
@@ -1599,10 +1716,16 @@ def _maybe_enable_xformers(pipeline, profile: str) -> None:
     if _is_zimage_pipeline(pipeline):
         transformer = getattr(pipeline, "transformer", None)
         if transformer is not None and hasattr(transformer, "set_attention_backend"):
-            candidates = _zimage_attention_backend_candidates(
+            base_candidates = _zimage_attention_backend_candidates(
                 backend_mode,
                 allow_xformers=(mode != "off"),
             )
+            discovered = _discover_transformer_attention_backends(transformer)
+            candidates = _remap_attention_backend_candidates(base_candidates, discovered)
+            if discovered:
+                print(f"[Z-Image POC] Attention backend capabilities detected: {discovered}")
+                if candidates != base_candidates:
+                    print(f"[Z-Image POC] Attention backend alias remap: {base_candidates} -> {candidates}")
             print(
                 f"[Z-Image POC] Attention backend probe start: mode={mode}, backend={backend_mode}, "
                 f"candidates={candidates}"
@@ -1610,7 +1733,10 @@ def _maybe_enable_xformers(pipeline, profile: str) -> None:
             if any(_is_flash_attention_backend(c) for c in candidates):
                 print("[Z-Image POC] Flash attention initiation: probing flash-compatible backends.")
             last_error = None
-            for candidate in candidates:
+            remapped_from_error = False
+            i = 0
+            while i < len(candidates):
+                candidate = candidates[i]
                 if _is_flash_attention_backend(candidate):
                     print(f"[Z-Image POC] Trying flash attention backend '{candidate}'...")
                 try:
@@ -1632,6 +1758,19 @@ def _maybe_enable_xformers(pipeline, profile: str) -> None:
                     last_error = e
                     if _is_flash_attention_backend(candidate):
                         print(f"[Z-Image POC] Flash attention backend '{candidate}' unavailable: {e}")
+                    discovered_from_error = _parse_backend_names_from_error(str(e))
+                    if discovered_from_error and not remapped_from_error:
+                        remapped_from_error = True
+                        remapped = _remap_attention_backend_candidates(base_candidates, discovered_from_error)
+                        if remapped != candidates:
+                            print(
+                                f"[Z-Image POC] Attention backend alias remap from runtime error: "
+                                f"{base_candidates} -> {remapped}"
+                            )
+                            candidates = remapped
+                            i = 0
+                            continue
+                i += 1
 
             pipeline._zimage_xformers_enabled = False
             pipeline._zimage_xformers_strategy = None
