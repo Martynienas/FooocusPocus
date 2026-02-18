@@ -208,14 +208,50 @@ def _recommended_flash_attn_packages_for_torch(minimum_version: str) -> list[str
     torch_version = torch_version_raw.split("+", 1)[0]
     major_minor = torch_version.split(".")[:2]
     key = ".".join(major_minor) if len(major_minor) == 2 else ""
+    python_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
 
+    # Try to extract cuda tag directly from torch distribution metadata, e.g. cu128.
+    cuda_tag = None
+    meta_match = re.search(r"(?:^|[+])((?:cu|rocm)\d+(?:\.\d+)?)$", torch_version_raw)
+    if meta_match:
+        cuda_tag = meta_match.group(1).replace(".", "")
+    else:
+        # Fallback: infer from torch.version.cuda, e.g. 12.8 -> cu128.
+        torch_cuda = _torch_cuda_version()
+        if torch_cuda:
+            cuda_digits = re.sub(r"[^0-9]", "", torch_cuda)
+            if cuda_digits:
+                cuda_tag = f"cu{cuda_digits}"
+
+    candidates = []
+    if cuda_tag:
+        torch_mm = ".".join(torch_version.split(".")[:2]) if torch_version else ""
+        flash_versions = {
+            "2.10": ["2.8.3", "2.8.2"],
+            "2.9": ["2.8.3", "2.8.2"],
+            "2.8": ["2.7.4.post1", "2.7.3"],
+        }.get(key, ["2.8.3", "2.8.2"])
+        if torch_mm:
+            if platform.system() == "Windows":
+                release = "v0.7.13"
+                suffix = "win_amd64.whl"
+            else:
+                release = "v0.7.16"
+                suffix = "linux_x86_64.whl"
+            for ver_flash in flash_versions:
+                candidates.append(
+                    "https://github.com/mjun0812/flash-attention-prebuild-wheels/"
+                    f"releases/download/{release}/flash_attn-{ver_flash}+{cuda_tag}"
+                    f"torch{torch_mm}-{python_tag}-{python_tag}-{suffix}"
+                )
+
+    # Keep package-spec fallbacks last in case direct wheel URLs are missing.
     table = {
-        # Best-known wheels around torch cu128 stacks; keep fallback lower bound last.
         "2.10": ["flash-attn==2.8.3", "flash-attn==2.8.2"],
         "2.9": ["flash-attn==2.8.3", "flash-attn==2.8.2"],
         "2.8": ["flash-attn==2.7.4.post1", "flash-attn==2.7.3"],
     }
-    candidates = list(table.get(key, []))
+    candidates.extend(table.get(key, []))
     candidates.append(f"flash-attn>={minimum_version}")
     return list(dict.fromkeys(candidates))
 
@@ -223,7 +259,10 @@ def _recommended_flash_attn_packages_for_torch(minimum_version: str) -> list[str
 def _try_install_flash_attn_binary(candidates: list[str], minimum_version: str) -> bool:
     for spec in candidates:
         print(f"Trying flash-attn binary wheel candidate: {spec}")
-        run_pip(f"install -U -I --only-binary=:all: \"{spec}\"", "flash-attn", live=True)
+        if spec.startswith(("http://", "https://")):
+            run_pip(f"install -U -I --no-deps \"{spec}\"", "flash-attn", live=True)
+        else:
+            run_pip(f"install -U -I --only-binary=:all: \"{spec}\"", "flash-attn", live=True)
 
         installed_version = _installed_dist_version("flash-attn")
         if installed_version is None:
@@ -297,7 +336,7 @@ def prepare_environment():
                 _cleanup_incompatible_xformers()
 
     if TRY_INSTALL_FLASH_ATTN and _flash_attn_install_supported():
-        flash_attn_package = os.environ.get('FLASH_ATTN_PACKAGE', "").strip()
+        flash_attn_package = os.environ.get('FLASH_ATTN_PACKAGE', "").strip() or os.environ.get('FLASH_PACKAGE', "").strip()
         flash_attn_min = os.environ.get('FLASH_ATTN_MIN_VERSION', "2.6.3").strip()
         flash_attn_force = _truthy_env("FLASH_ATTN_REINSTALL", "0")
         flash_binary_only = _truthy_env("FLASH_ATTN_BINARY_ONLY", "1")
