@@ -327,6 +327,12 @@ def list_zimage_component_entries(component_name: str, checkpoint_folders: list[
     if component_name not in ("text_encoder", "vae"):
         return []
     roots = [_universal_zimage_root()] + list(checkpoint_folders or [])
+    for folder in list(checkpoint_folders or []):
+        try:
+            parent = os.path.abspath(os.path.dirname(folder))
+            roots.append(os.path.join(parent, "zimage"))
+        except Exception:
+            pass
     results = []
     seen = set()
     for root in roots:
@@ -373,23 +379,23 @@ def _zimage_component_choice_pairs(component_name: str, checkpoint_folders: list
     entries = list_zimage_component_entries(component_name, checkpoint_folders)
     pairs = []
     label_counts = {}
-    for entry in entries:
-        rel = _human_component_path(entry, checkpoint_folders)
-        weight_files = _component_weight_files(entry)
-        if weight_files:
-            preview = ", ".join(weight_files[:2])
-            if len(weight_files) > 2:
-                preview += f" +{len(weight_files) - 2} more"
-            label = f"{rel} [{preview}]"
-        else:
-            label = rel
 
+    def _push_choice(raw_label: str, raw_value: str):
+        label = raw_label
         if label in label_counts:
             label_counts[label] += 1
             label = f"{label} ({label_counts[label]})"
         else:
             label_counts[label] = 1
-        pairs.append((label, os.path.abspath(entry)))
+        pairs.append((label, raw_value))
+
+    for entry in entries:
+        entry = os.path.abspath(entry)
+        rel = _human_component_path(entry, checkpoint_folders)
+        weight_files = _component_weight_files(entry)
+        _push_choice(f"{rel} [default]", entry)
+        for filename in weight_files:
+            _push_choice(f"{rel} :: {filename}", os.path.abspath(os.path.join(entry, filename)))
     return pairs
 
 
@@ -407,6 +413,8 @@ def resolve_zimage_component_path(
         return None
 
     if os.path.isabs(selected):
+        if os.path.isfile(selected):
+            return os.path.abspath(selected)
         return os.path.abspath(selected) if _is_valid_component_dir(selected, component_name) else None
 
     for label, path in _zimage_component_choice_pairs(component_name, checkpoint_folders):
@@ -1682,6 +1690,9 @@ def _load_component_override(pipeline, component_name: str, component_path: str,
     if component is None:
         print(f"[Z-Image POC] Pipeline has no '{component_name}' component; ignoring override.")
         return
+    if os.path.isfile(component_path):
+        _load_component_override_from_file(pipeline, component_name, component_path)
+        return
 
     cls = component.__class__
     kwargs = {
@@ -1706,6 +1717,47 @@ def _load_component_override(pipeline, component_name: str, component_path: str,
     else:
         setattr(pipeline, component_name, model)
     print(f"[Z-Image POC] Using override {component_name}: {component_path}")
+
+
+def _load_component_override_from_file(pipeline, component_name: str, component_file: str) -> None:
+    import torch
+
+    component = getattr(pipeline, component_name, None)
+    if component is None:
+        print(f"[Z-Image POC] Pipeline has no '{component_name}' component; ignoring file override.")
+        return
+
+    file_path = os.path.abspath(component_file)
+    state_dict = None
+    if file_path.lower().endswith(".safetensors"):
+        from safetensors.torch import load_file as safetensors_load_file
+        state_dict = safetensors_load_file(file_path, device="cpu")
+    else:
+        raw = torch.load(file_path, map_location="cpu")
+        if isinstance(raw, dict) and isinstance(raw.get("state_dict"), dict):
+            state_dict = raw["state_dict"]
+        elif isinstance(raw, dict):
+            state_dict = raw
+        else:
+            raise RuntimeError(f"Unsupported override weights format: {file_path}")
+
+    model_keys = set(component.state_dict().keys())
+    remapped = _remap_state_dict_to_model_keys(
+        state_dict,
+        model_keys,
+        f"{component_name}-file-override",
+        verbose=True,
+    )
+    _apply_component_state_dict(
+        component,
+        remapped,
+        label=f"{component_name} file override ({os.path.basename(file_path)})",
+        missing_limit=None,
+        unexpected_limit=None,
+    )
+    print(f"[Z-Image POC] Using override {component_name} file: {file_path}")
+    state_dict.clear()
+    remapped.clear()
 
 
 def _load_pipeline(
