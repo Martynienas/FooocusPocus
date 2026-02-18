@@ -11,6 +11,7 @@ from typing import Optional
 _PIPELINE_CACHE = {}
 _PROMPT_EMBED_CACHE = {}
 _MAX_PROMPT_CACHE_ITEMS = 32
+_ENV_WARNING_ONCE = set()
 _TOKENIZER_JSON_SHA256 = {
     "Tongyi-MAI/Z-Image-Turbo": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
 }
@@ -168,6 +169,40 @@ def _zimage_perf_profile() -> str:
     if profile not in ("safe", "balanced", "speed"):
         return "safe"
     return profile
+
+
+def _warn_once_env(key: str, message: str) -> None:
+    token = f"{key}:{message}"
+    if token in _ENV_WARNING_ONCE:
+        return
+    _ENV_WARNING_ONCE.add(token)
+    print(message)
+
+
+def _zimage_forced_memory_mode() -> Optional[str]:
+    raw = os.environ.get("FOOOCUS_ZIMAGE_FORCE_MEMORY_MODE", "").strip().lower()
+    if raw == "":
+        return None
+
+    aliases = {
+        "full_gpu": "full_gpu",
+        "full": "full_gpu",
+        "gpu": "full_gpu",
+        "model_offload": "model_offload",
+        "model": "model_offload",
+        "sequential_offload": "sequential_offload",
+        "sequential": "sequential_offload",
+    }
+    forced = aliases.get(raw, None)
+    if forced is None:
+        _warn_once_env(
+            "FOOOCUS_ZIMAGE_FORCE_MEMORY_MODE",
+            f"[Z-Image POC] Ignoring invalid FOOOCUS_ZIMAGE_FORCE_MEMORY_MODE='{raw}'. "
+            "Expected one of: full_gpu, model_offload, sequential_offload.",
+        )
+        return None
+
+    return forced
 
 
 def _zimage_stage_timers_enabled() -> bool:
@@ -1490,6 +1525,10 @@ def _choose_memory_mode(device: str, profile: str = "safe") -> tuple[str, float,
 
     pressure = (free_vram_gb / total_vram_gb) if total_vram_gb > 0 else 0.0
 
+    forced_mode = _zimage_forced_memory_mode()
+    if forced_mode is not None:
+        return forced_mode, total_vram_gb, free_vram_gb, pressure
+
     # Profile-based policy:
     # safe: maximize stability under low/medium VRAM
     # balanced: faster default on 10-16GB while keeping fallback room
@@ -1561,10 +1600,11 @@ def _apply_memory_mode(
     pressure: float,
     profile: str,
     reason: str = "",
+    allow_relax: bool = False,
 ) -> tuple[str, bool]:
     used_offload = False
     current_mode = getattr(pipeline, "_zimage_memory_mode", "unset")
-    if current_mode in ("sequential_offload", "model_offload", "full_gpu"):
+    if (not allow_relax) and current_mode in ("sequential_offload", "model_offload", "full_gpu"):
         target_mode = _stricter_memory_mode(current_mode, target_mode)
 
     reason_suffix = f", reason={reason}" if reason else ""
@@ -1617,6 +1657,7 @@ def _preflight_generation_memory_mode(
 
     base_mode, total_vram_gb, free_vram_gb, pressure = _choose_memory_mode(device, profile=profile)
     target_mode = base_mode
+    forced_mode = _zimage_forced_memory_mode()
     estimated_need_gb = _estimate_generation_vram_need_gb(
         width=width,
         height=height,
@@ -1627,14 +1668,23 @@ def _preflight_generation_memory_mode(
     headroom_gb = {"safe": 1.75, "balanced": 1.35, "speed": 0.95}.get(profile, 1.35)
     gap_gb = free_vram_gb - estimated_need_gb
 
-    if gap_gb < max(0.35, headroom_gb * 0.50):
-        target_mode = "sequential_offload"
-    elif gap_gb < headroom_gb:
-        target_mode = _stricter_memory_mode(target_mode, "model_offload")
+    if forced_mode is None:
+        if gap_gb < max(0.35, headroom_gb * 0.50):
+            target_mode = "sequential_offload"
+        elif gap_gb < headroom_gb:
+            target_mode = _stricter_memory_mode(target_mode, "model_offload")
+    else:
+        target_mode = forced_mode
 
     current_mode = getattr(pipeline, "_zimage_memory_mode", "unset")
-    if _memory_mode_rank(target_mode) > _memory_mode_rank(current_mode):
+    should_reapply_mode = _memory_mode_rank(target_mode) > _memory_mode_rank(current_mode)
+    if forced_mode is not None and target_mode != current_mode:
+        should_reapply_mode = True
+
+    if should_reapply_mode:
         reason = f"preflight est={estimated_need_gb:.2f}GB gap={gap_gb:.2f}GB"
+        if forced_mode is not None:
+            reason = f"forced by env FOOOCUS_ZIMAGE_FORCE_MEMORY_MODE={forced_mode}"
         generator_device, used_offload = _apply_memory_mode(
             pipeline=pipeline,
             device=device,
@@ -1644,13 +1694,15 @@ def _preflight_generation_memory_mode(
             pressure=pressure,
             profile=profile,
             reason=reason,
+            allow_relax=(forced_mode is not None),
         )
         _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
 
+    forced_suffix = f", forced={forced_mode}" if forced_mode is not None else ""
     print(
         f"[Z-Image POC] Preflight VRAM budget: est={estimated_need_gb:.2f}GB, "
         f"free={free_vram_gb:.2f}GB, gap={gap_gb:.2f}GB, base={base_mode}, "
-        f"active={getattr(pipeline, '_zimage_memory_mode', 'unset')}."
+        f"active={getattr(pipeline, '_zimage_memory_mode', 'unset')}{forced_suffix}."
     )
     return generator_device, used_offload
 
@@ -1858,6 +1910,7 @@ def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
 
     used_offload = False
     profile = _zimage_perf_profile()
+    forced_mode = _zimage_forced_memory_mode()
     pipeline._zimage_perf_profile = profile
 
     if device == "cuda":
@@ -1891,6 +1944,9 @@ def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
                     pass
 
         target_mode, total_vram_gb, free_vram_gb, pressure = _choose_memory_mode(device, profile=profile)
+        reason = ""
+        if forced_mode is not None:
+            reason = f"forced by env FOOOCUS_ZIMAGE_FORCE_MEMORY_MODE={forced_mode}"
         _, used_offload = _apply_memory_mode(
             pipeline=pipeline,
             device=device,
@@ -1899,6 +1955,8 @@ def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
             free_vram_gb=free_vram_gb,
             pressure=pressure,
             profile=profile,
+            reason=reason,
+            allow_relax=(forced_mode is not None),
         )
     else:
         pipeline.to(device)

@@ -909,6 +909,42 @@ def worker():
         async_task.adm_scaler_end = 0.0
         async_task.steps = 9
 
+    def _truthy_env(name: str, default: str = '0') -> bool:
+        return os.environ.get(name, default).strip().lower() in ('1', 'true', 'yes', 'on')
+
+    def maybe_unload_standard_models_for_zimage():
+        if not _truthy_env('FOOOCUS_ZIMAGE_UNLOAD_STANDARD_MODELS', '0'):
+            return False
+
+        print(
+            '[Z-Image POC] Unloading standard Fooocus models before Z-Image run '
+            '(FOOOCUS_ZIMAGE_UNLOAD_STANDARD_MODELS=1).'
+        )
+        try:
+            pipeline.clear_all_caches()
+        except Exception as e:
+            print(f'[Z-Image POC] Warning: failed to clear standard prompt cache: {e}')
+
+        try:
+            # Drop references to currently active non-Z-Image pipeline objects.
+            pipeline.final_unet = None
+            pipeline.final_clip = None
+            pipeline.final_vae = None
+            pipeline.final_refiner_unet = None
+            pipeline.final_refiner_vae = None
+            pipeline.final_expansion = None
+        except Exception as e:
+            print(f'[Z-Image POC] Warning: failed to clear standard pipeline refs: {e}')
+
+        try:
+            ldm_patched.modules.model_management.unload_all_models()
+            ldm_patched.modules.model_management.soft_empty_cache(force=True)
+            print('[Z-Image POC] Standard model unload complete.')
+            return True
+        except Exception as e:
+            print(f'[Z-Image POC] Warning: standard model unload failed: {e}')
+            return False
+
     def run_zimage_poc(async_task, width, height, current_progress):
         source_kind, source_path, flavor = modules.zimage_poc.resolve_zimage_source(
             async_task.base_model_name,
@@ -935,6 +971,7 @@ def worker():
         if unsupported:
             print(f"[Z-Image POC] Ignoring unsupported features: {', '.join(unsupported)}")
 
+        maybe_unload_standard_models_for_zimage()
         apply_zimage_turbo_defaults(async_task)
         current_progress = max(current_progress, 2)
         progressbar(async_task, current_progress, 'Running Z-Image POC generation ...')
