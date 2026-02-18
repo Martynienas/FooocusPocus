@@ -11,6 +11,10 @@ from typing import Optional
 _PIPELINE_CACHE = {}
 _PROMPT_EMBED_CACHE = {}
 _MAX_PROMPT_CACHE_ITEMS = 32
+_TRANSFORMER_MAPPING_DECISION_CACHE = {}
+_MAX_TRANSFORMER_MAPPING_DECISIONS = 32
+_TRANSFORMER_MAPPING_CACHE_VERSION = "v1"
+_PERSISTENT_TRANSFORMER_CACHE_VERSION = "v1"
 _ENV_WARNING_ONCE = set()
 _TOKENIZER_JSON_SHA256 = {
     "Tongyi-MAI/Z-Image-Turbo": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
@@ -31,6 +35,211 @@ def _pipeline_cache_key(
     te = os.path.abspath(text_encoder_override) if text_encoder_override else "-"
     vae = os.path.abspath(vae_override) if vae_override else "-"
     return f"{source_kind}:{os.path.abspath(source_path)}:te={te}:vae={vae}"
+
+
+def _single_file_identity(path: str) -> str:
+    abspath = os.path.abspath(path)
+    try:
+        st = os.stat(abspath)
+        return f"{abspath}:{int(st.st_size)}:{int(st.st_mtime_ns)}"
+    except OSError:
+        return f"{abspath}:missing"
+
+
+def _keys_signature(keys: set[str]) -> str:
+    hasher = hashlib.sha1()
+    for key in sorted(keys):
+        hasher.update(key.encode("utf-8", errors="ignore"))
+        hasher.update(b"\0")
+    return f"{len(keys)}:{hasher.hexdigest()}"
+
+
+def _transformer_mapping_cache_key(single_file_path: str, model_keys: set[str]) -> str:
+    return "|".join(
+        (
+            _TRANSFORMER_MAPPING_CACHE_VERSION,
+            _single_file_identity(single_file_path),
+            _keys_signature(model_keys),
+        )
+    )
+
+
+def _mapping_cache_get(cache_key: str):
+    entry = _TRANSFORMER_MAPPING_DECISION_CACHE.pop(cache_key, None)
+    if entry is not None:
+        # Keep recently used entries warm in insertion order.
+        _TRANSFORMER_MAPPING_DECISION_CACHE[cache_key] = entry
+    return entry
+
+
+def _mapping_cache_put(cache_key: str, value: dict) -> None:
+    if cache_key in _TRANSFORMER_MAPPING_DECISION_CACHE:
+        _TRANSFORMER_MAPPING_DECISION_CACHE.pop(cache_key, None)
+    _TRANSFORMER_MAPPING_DECISION_CACHE[cache_key] = value
+    while len(_TRANSFORMER_MAPPING_DECISION_CACHE) > _MAX_TRANSFORMER_MAPPING_DECISIONS:
+        oldest = next(iter(_TRANSFORMER_MAPPING_DECISION_CACHE))
+        _TRANSFORMER_MAPPING_DECISION_CACHE.pop(oldest, None)
+
+
+def _zimage_persist_converted_cache_enabled() -> bool:
+    return _truthy_env("FOOOCUS_ZIMAGE_PERSIST_CONVERTED_CACHE", "1")
+
+
+def _zimage_persist_converted_cache_dir() -> str:
+    raw = os.environ.get("FOOOCUS_ZIMAGE_PERSIST_CONVERTED_CACHE_DIR", "").strip()
+    if raw:
+        return os.path.abspath(os.path.expanduser(raw))
+    return os.path.join(os.path.expanduser("~"), ".cache", "fooocuspocus", "zimage", "transformer_converted")
+
+
+def _zimage_persist_converted_max_items() -> int:
+    raw = os.environ.get("FOOOCUS_ZIMAGE_PERSIST_CONVERTED_MAX_ITEMS", "").strip()
+    if raw == "":
+        return 2
+    try:
+        value = int(raw)
+        if value < 1:
+            raise ValueError()
+        return min(value, 64)
+    except Exception:
+        _warn_once_env(
+            "FOOOCUS_ZIMAGE_PERSIST_CONVERTED_MAX_ITEMS",
+            f"[Z-Image POC] Ignoring invalid FOOOCUS_ZIMAGE_PERSIST_CONVERTED_MAX_ITEMS='{raw}'.",
+        )
+        return 2
+
+
+def _persistent_transformer_cache_paths(single_file_path: str) -> tuple[str, str]:
+    source_id = _single_file_identity(single_file_path)
+    key = f"{_PERSISTENT_TRANSFORMER_CACHE_VERSION}|{source_id}"
+    digest = hashlib.sha1(key.encode("utf-8", errors="ignore")).hexdigest()
+    cache_dir = _zimage_persist_converted_cache_dir()
+    return (
+        os.path.join(cache_dir, f"{digest}.safetensors"),
+        os.path.join(cache_dir, f"{digest}.json"),
+    )
+
+
+def _cleanup_persisted_transformer_cache(cache_dir: str) -> None:
+    max_items = _zimage_persist_converted_max_items()
+    try:
+        names = [n for n in os.listdir(cache_dir) if n.endswith(".safetensors")]
+        files = [os.path.join(cache_dir, n) for n in names]
+        files = [p for p in files if os.path.isfile(p)]
+        if len(files) <= max_items:
+            return
+        files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        for stale in files[max_items:]:
+            meta = os.path.splitext(stale)[0] + ".json"
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+            try:
+                if os.path.isfile(meta):
+                    os.remove(meta)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+def _load_persisted_converted_transformer(single_file_path: str) -> Optional[dict]:
+    if not _zimage_persist_converted_cache_enabled():
+        return None
+    tensor_path, meta_path = _persistent_transformer_cache_paths(single_file_path)
+    if not os.path.isfile(tensor_path):
+        return None
+
+    try:
+        from safetensors.torch import load_file as safetensors_load_file
+
+        state_dict = safetensors_load_file(tensor_path, device="cpu")
+        if not isinstance(state_dict, dict) or len(state_dict) == 0:
+            return None
+        now = time.time()
+        try:
+            os.utime(tensor_path, (now, now))
+            if os.path.isfile(meta_path):
+                os.utime(meta_path, (now, now))
+        except OSError:
+            pass
+        print(
+            f"[Z-Image POC] Loaded persisted converted transformer cache "
+            f"({len(state_dict)} tensors)."
+        )
+        return state_dict
+    except Exception as e:
+        _warn_once_env(
+            "FOOOCUS_ZIMAGE_PERSIST_CONVERTED_CACHE",
+            f"[Z-Image POC] Failed to load persisted converted transformer cache: {e}",
+        )
+        try:
+            os.remove(tensor_path)
+        except OSError:
+            pass
+        try:
+            if os.path.isfile(meta_path):
+                os.remove(meta_path)
+        except OSError:
+            pass
+        return None
+
+
+def _save_persisted_converted_transformer(single_file_path: str, state_dict: dict) -> None:
+    if not _zimage_persist_converted_cache_enabled() or not state_dict:
+        return
+    tensor_path, meta_path = _persistent_transformer_cache_paths(single_file_path)
+    if os.path.isfile(tensor_path):
+        return
+
+    cache_dir = os.path.dirname(tensor_path)
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except OSError as e:
+        _warn_once_env(
+            "FOOOCUS_ZIMAGE_PERSIST_CONVERTED_CACHE",
+            f"[Z-Image POC] Failed to prepare persistent cache dir '{cache_dir}': {e}",
+        )
+        return
+
+    tensor_tmp = f"{tensor_path}.tmp.{os.getpid()}.{int(time.time() * 1000)}"
+    meta_tmp = f"{meta_path}.tmp.{os.getpid()}.{int(time.time() * 1000)}"
+    try:
+        from safetensors.torch import save_file as safetensors_save_file
+
+        safetensors_save_file(state_dict, tensor_tmp)
+        os.replace(tensor_tmp, tensor_path)
+
+        meta = {
+            "version": _PERSISTENT_TRANSFORMER_CACHE_VERSION,
+            "source_identity": _single_file_identity(single_file_path),
+            "created_at_unix": int(time.time()),
+            "tensor_count": len(state_dict),
+        }
+        with open(meta_tmp, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=True)
+        os.replace(meta_tmp, meta_path)
+        _cleanup_persisted_transformer_cache(cache_dir)
+        print(
+            f"[Z-Image POC] Saved persisted converted transformer cache "
+            f"({len(state_dict)} tensors)."
+        )
+    except Exception as e:
+        _warn_once_env(
+            "FOOOCUS_ZIMAGE_PERSIST_CONVERTED_CACHE",
+            f"[Z-Image POC] Failed to save persisted converted transformer cache: {e}",
+        )
+        try:
+            if os.path.isfile(tensor_tmp):
+                os.remove(tensor_tmp)
+        except OSError:
+            pass
+        try:
+            if os.path.isfile(meta_tmp):
+                os.remove(meta_tmp)
+        except OSError:
+            pass
 
 
 def _clear_prompt_cache_for_pipeline(cache_key: str) -> None:
@@ -1176,6 +1385,70 @@ def _transformer_match_score(state_dict: dict, model_keys: set[str]) -> int:
     return _transformer_match_score_from_keys(state_dict.keys() if state_dict else [], model_keys)
 
 
+def _choose_transformer_mapping(single_file_path: str, state_dict: dict, model_keys: set[str]) -> dict:
+    if not state_dict or not model_keys:
+        return {"use_forge_mapping": False, "base_score": 0, "converted_score": 0, "cache_hit": False}
+
+    cache_key = _transformer_mapping_cache_key(single_file_path, model_keys)
+    cached = _mapping_cache_get(cache_key)
+    if cached is not None:
+        return {
+            "use_forge_mapping": bool(cached.get("use_forge_mapping", False)),
+            "base_score": int(cached.get("base_score", 0)),
+            "converted_score": int(cached.get("converted_score", 0)),
+            "cache_hit": True,
+        }
+
+    base_score = _transformer_match_score(state_dict, model_keys)
+    converted_keys = []
+    for key in state_dict.keys():
+        converted_keys.extend(_convert_z_image_transformer_key_to_diffusers(key))
+    converted_score = _transformer_match_score_from_keys(converted_keys, model_keys)
+    use_forge_mapping = converted_score > base_score
+
+    _mapping_cache_put(
+        cache_key,
+        {
+            "use_forge_mapping": use_forge_mapping,
+            "base_score": base_score,
+            "converted_score": converted_score,
+        },
+    )
+    return {
+        "use_forge_mapping": use_forge_mapping,
+        "base_score": base_score,
+        "converted_score": converted_score,
+        "cache_hit": False,
+    }
+
+
+def _maybe_convert_transformer_checkpoint(single_file_path: str, state_dict: dict, model_keys: set[str]) -> dict:
+    if not state_dict or not model_keys:
+        return state_dict
+
+    decision = _choose_transformer_mapping(single_file_path, state_dict, model_keys)
+    if not decision["use_forge_mapping"]:
+        return state_dict
+
+    persisted_sd = _load_persisted_converted_transformer(single_file_path)
+    if persisted_sd is not None:
+        return persisted_sd
+
+    if decision["cache_hit"]:
+        print(
+            f"[Z-Image POC] Reusing cached Forge-style Z-Image transformer key mapping "
+            f"(score {decision['base_score']}->{decision['converted_score']})."
+        )
+    else:
+        print(
+            f"[Z-Image POC] Using Forge-style Z-Image transformer key mapping "
+            f"(score {decision['base_score']}->{decision['converted_score']})."
+        )
+    converted_sd = _convert_z_image_transformer_checkpoint_to_diffusers(state_dict)
+    _save_persisted_converted_transformer(single_file_path, converted_sd)
+    return converted_sd
+
+
 def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) -> None:
     parts = _split_single_file_state_dict(single_file_path, include_aux_weights=True)
     transformer_sd = parts["transformer"]
@@ -1185,18 +1458,10 @@ def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) 
     )
 
     if transformer_sd and transformer_model_keys:
-        base_score = _transformer_match_score(transformer_sd, transformer_model_keys)
         try:
-            converted_keys = []
-            for key in transformer_sd.keys():
-                converted_keys.extend(_convert_z_image_transformer_key_to_diffusers(key))
-            converted_score = _transformer_match_score_from_keys(converted_keys, transformer_model_keys)
-            if converted_score > base_score:
-                print(
-                    f"[Z-Image POC] Using Forge-style Z-Image transformer key mapping "
-                    f"(score {base_score}->{converted_score})."
-                )
-                transformer_sd = _convert_z_image_transformer_checkpoint_to_diffusers(transformer_sd)
+            transformer_sd = _maybe_convert_transformer_checkpoint(
+                single_file_path, transformer_sd, transformer_model_keys
+            )
         except Exception as e:
             print(f"[Z-Image POC] Z-Image transformer conversion skipped: {e}")
 
@@ -1439,18 +1704,10 @@ def _build_pipeline_from_single_file_components(
 
     selected_transformer_sd = raw_transformer_sd
     if raw_transformer_sd and transformer_model_keys:
-        base_score = _transformer_match_score(raw_transformer_sd, transformer_model_keys)
         try:
-            converted_keys = []
-            for key in raw_transformer_sd.keys():
-                converted_keys.extend(_convert_z_image_transformer_key_to_diffusers(key))
-            converted_score = _transformer_match_score_from_keys(converted_keys, transformer_model_keys)
-            if converted_score > base_score:
-                print(
-                    f"[Z-Image POC] Using Forge-style Z-Image transformer key mapping "
-                    f"(score {base_score}->{converted_score})."
-                )
-                selected_transformer_sd = _convert_z_image_transformer_checkpoint_to_diffusers(raw_transformer_sd)
+            selected_transformer_sd = _maybe_convert_transformer_checkpoint(
+                single_file_path, raw_transformer_sd, transformer_model_keys
+            )
         except Exception as e:
             print(f"[Z-Image POC] Z-Image transformer conversion skipped: {e}")
 
