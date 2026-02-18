@@ -965,6 +965,8 @@ def worker():
         current_progress = max(current_progress, 2)
         progressbar(async_task, current_progress, 'Running Z-Image POC generation ...')
 
+        release_cache_after_run = _truthy_env('FOOOCUS_ZIMAGE_RELEASE_CACHE_AFTER_RUN', '0')
+
         try:
             for i in range(async_task.image_number):
                 if async_task.last_stop is not False:
@@ -1030,14 +1032,19 @@ def worker():
         finally:
             if unloaded_standard_models:
                 try:
-                    stats = modules.zimage_poc.clear_runtime_caches(flush_cuda=True, aggressive=True)
                     ldm_patched.modules.model_management.soft_empty_cache(force=True)
-                    print(
-                        "[Z-Image POC] Released Z-Image runtime cache after unload mode: "
-                        f"pipelines={stats.get('pipelines', 0)}, prompt_cache_entries={stats.get('prompt_cache_entries', 0)}."
-                    )
                 except Exception as e:
-                    print(f'[Z-Image POC] Warning: failed to release Z-Image runtime cache: {e}')
+                    print(f'[Z-Image POC] Warning: failed to flush CUDA cache after unload mode: {e}')
+
+                if release_cache_after_run:
+                    try:
+                        stats = modules.zimage_poc.clear_runtime_caches(flush_cuda=True, aggressive=True)
+                        print(
+                            "[Z-Image POC] Released Z-Image runtime cache after unload mode: "
+                            f"pipelines={stats.get('pipelines', 0)}, prompt_cache_entries={stats.get('prompt_cache_entries', 0)}."
+                        )
+                    except Exception as e:
+                        print(f'[Z-Image POC] Warning: failed to release Z-Image runtime cache: {e}')
 
     def apply_image_input(async_task, base_model_additional_loras, clip_vision_path, controlnet_canny_path,
                           controlnet_cpds_path, goals, inpaint_head_model_path, inpaint_image, inpaint_mask,
