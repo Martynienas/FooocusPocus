@@ -1,6 +1,8 @@
 import os
 import ssl
 import sys
+import re
+import subprocess
 import importlib.metadata
 import packaging.version
 
@@ -26,7 +28,7 @@ from modules.model_loader import load_file_from_url
 
 REINSTALL_ALL = False
 TRY_INSTALL_XFORMERS = True
-TRY_INSTALL_FLASH_ATTN = True
+TRY_INSTALL_FLASH_ATTN = os.environ.get("TRY_INSTALL_FLASH_ATTN", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 def torch_stack_is_compatible(min_torch_version: str = "2.2.0") -> bool:
@@ -135,6 +137,42 @@ def _flash_attn_runtime_healthy() -> bool:
         return False
 
 
+def _detect_cuda_toolkit_version() -> str | None:
+    nvcc_candidates = []
+    cuda_home = os.environ.get("CUDA_HOME", "").strip() or os.environ.get("CUDA_PATH", "").strip()
+    if cuda_home:
+        nvcc_candidates.append(os.path.join(cuda_home, "bin", "nvcc"))
+    nvcc_candidates.append("nvcc")
+
+    for candidate in nvcc_candidates:
+        try:
+            result = subprocess.run(
+                [candidate, "--version"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                continue
+            output = result.stdout or ""
+            match = re.search(r"release\s+(\d+\.\d+)", output, flags=re.IGNORECASE)
+            if match:
+                return match.group(1)
+        except Exception:
+            continue
+    return None
+
+
+def _torch_cuda_version() -> str | None:
+    try:
+        import torch
+        value = getattr(torch.version, "cuda", None)
+        return str(value).strip() if value else None
+    except Exception:
+        return None
+
+
 def _flash_attn_install_supported() -> bool:
     if platform.system() != "Linux":
         print("flash-attn auto-install is currently enabled only on Linux. Skipping.")
@@ -159,6 +197,43 @@ def _version_is_lt(installed: str | None, minimum: str | None) -> bool:
         return left < right
     except Exception:
         return False
+
+
+def _truthy_env(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _recommended_flash_attn_packages_for_torch(minimum_version: str) -> list[str]:
+    torch_version_raw = _installed_dist_version("torch") or ""
+    torch_version = torch_version_raw.split("+", 1)[0]
+    major_minor = torch_version.split(".")[:2]
+    key = ".".join(major_minor) if len(major_minor) == 2 else ""
+
+    table = {
+        # Best-known wheels around torch cu128 stacks; keep fallback lower bound last.
+        "2.10": ["flash-attn==2.8.3", "flash-attn==2.8.2"],
+        "2.9": ["flash-attn==2.8.3", "flash-attn==2.8.2"],
+        "2.8": ["flash-attn==2.7.4.post1", "flash-attn==2.7.3"],
+    }
+    candidates = list(table.get(key, []))
+    candidates.append(f"flash-attn>={minimum_version}")
+    return list(dict.fromkeys(candidates))
+
+
+def _try_install_flash_attn_binary(candidates: list[str], minimum_version: str) -> bool:
+    for spec in candidates:
+        print(f"Trying flash-attn binary wheel candidate: {spec}")
+        run_pip(f"install -U -I --only-binary=:all: \"{spec}\"", "flash-attn", live=True)
+
+        installed_version = _installed_dist_version("flash-attn")
+        if installed_version is None:
+            continue
+        if _version_is_lt(installed_version, minimum_version):
+            continue
+        if _flash_attn_runtime_healthy():
+            print(f"flash-attn binary install succeeded: version={installed_version}")
+            return True
+    return False
 
 
 def prepare_environment():
@@ -222,9 +297,10 @@ def prepare_environment():
                 _cleanup_incompatible_xformers()
 
     if TRY_INSTALL_FLASH_ATTN and _flash_attn_install_supported():
-        flash_attn_package = os.environ.get('FLASH_ATTN_PACKAGE', "flash-attn>=2.6.3").strip()
+        flash_attn_package = os.environ.get('FLASH_ATTN_PACKAGE', "").strip()
         flash_attn_min = os.environ.get('FLASH_ATTN_MIN_VERSION', "2.6.3").strip()
-        flash_attn_force = os.environ.get('FLASH_ATTN_REINSTALL', "").strip().lower() in ("1", "true", "yes", "on")
+        flash_attn_force = _truthy_env("FLASH_ATTN_REINSTALL", "0")
+        flash_binary_only = _truthy_env("FLASH_ATTN_BINARY_ONLY", "1")
 
         installed_flash_attn = _installed_dist_version("flash-attn")
         need_flash_attn_install = (
@@ -235,17 +311,43 @@ def prepare_environment():
         )
 
         if need_flash_attn_install:
-            if installed_flash_attn:
+            if flash_binary_only:
+                if flash_attn_package:
+                    candidates = [flash_attn_package]
+                else:
+                    candidates = _recommended_flash_attn_packages_for_torch(flash_attn_min)
                 print(
-                    f"flash-attn {installed_flash_attn} does not satisfy target >= {flash_attn_min}; "
-                    f"installing {flash_attn_package}."
+                    "flash-attn binary-only auto-install enabled "
+                    "(set FLASH_ATTN_BINARY_ONLY=0 to allow source builds)."
                 )
+                installed_ok = _try_install_flash_attn_binary(candidates, flash_attn_min)
+                if not installed_ok:
+                    print(
+                        "No compatible prebuilt flash-attn wheel found. "
+                        "Skipping flash-attn install and continuing with fallback attention backends."
+                    )
             else:
-                print(f"Installing flash-attn package: {flash_attn_package}.")
-            try:
-                run_pip(f"install -U -I --no-build-isolation {flash_attn_package}", "flash-attn", live=True)
-            except Exception as e:
-                print(f"flash-attn install failed, continuing with fallback attention backends: {e}")
+                torch_cuda = _torch_cuda_version()
+                toolkit_cuda = _detect_cuda_toolkit_version()
+                ignore_cuda_mismatch = _truthy_env("FLASH_ATTN_IGNORE_CUDA_MISMATCH", "0")
+                if (
+                    torch_cuda
+                    and toolkit_cuda
+                    and torch_cuda != toolkit_cuda
+                    and not ignore_cuda_mismatch
+                ):
+                    print(
+                        f"Skipping flash-attn source build due to CUDA mismatch: toolkit={toolkit_cuda}, torch={torch_cuda}. "
+                        "Set FLASH_ATTN_IGNORE_CUDA_MISMATCH=1 to force install attempt."
+                    )
+                    print("Tip: point CUDA_HOME/CUDA_PATH to a toolkit matching torch CUDA (or install matching toolkit).")
+                else:
+                    source_spec = flash_attn_package or f"flash-attn>={flash_attn_min}"
+                    print(f"Installing flash-attn package from source path: {source_spec}.")
+                    try:
+                        run_pip(f"install -U -I --no-build-isolation \"{source_spec}\"", "flash-attn", live=True)
+                    except Exception as e:
+                        print(f"flash-attn install failed, continuing with fallback attention backends: {e}")
 
         if _installed_dist_version("flash-attn") is not None and not _flash_attn_runtime_healthy():
             print("flash-attn package is installed but runtime import failed; continuing with fallback attention backends.")
