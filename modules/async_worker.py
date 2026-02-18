@@ -960,72 +960,84 @@ def worker():
         if unsupported:
             print(f"[Z-Image POC] Ignoring unsupported features: {', '.join(unsupported)}")
 
-        maybe_unload_standard_models_for_zimage()
+        unloaded_standard_models = maybe_unload_standard_models_for_zimage()
         apply_zimage_turbo_defaults(async_task)
         current_progress = max(current_progress, 2)
         progressbar(async_task, current_progress, 'Running Z-Image POC generation ...')
 
-        for i in range(async_task.image_number):
-            if async_task.last_stop is not False:
-                break
+        try:
+            for i in range(async_task.image_number):
+                if async_task.last_stop is not False:
+                    break
 
-            if async_task.disable_seed_increment:
-                task_seed = async_task.seed % (constants.MAX_SEED + 1)
-            else:
-                task_seed = (async_task.seed + i) % (constants.MAX_SEED + 1)
+                if async_task.disable_seed_increment:
+                    task_seed = async_task.seed % (constants.MAX_SEED + 1)
+                else:
+                    task_seed = (async_task.seed + i) % (constants.MAX_SEED + 1)
 
-            task_rng = random.Random(task_seed)
-            task_prompt = apply_dynamic_prompts(
-                apply_wildcards(async_task.prompt, task_rng, i, async_task.read_wildcards_in_order),
-                task_rng,
-            )
-            task_negative_prompt = apply_dynamic_prompts(
-                apply_wildcards(async_task.negative_prompt, task_rng, i, async_task.read_wildcards_in_order),
-                task_rng,
-            )
-
-            progressbar(async_task, current_progress, f'Generating Z-Image {i + 1}/{async_task.image_number} ...')
-            try:
-                pil_image = modules.zimage_poc.generate_zimage(
-                    source_kind=source_kind,
-                    source_path=source_path,
-                    flavor=flavor,
-                    checkpoint_folders=modules.config.paths_checkpoints,
-                    prompt=task_prompt,
-                    negative_prompt=task_negative_prompt,
-                    width=width,
-                    height=height,
-                    steps=async_task.steps,
-                    guidance_scale=float(async_task.cfg_scale),
-                    seed=task_seed,
-                    shift=float(async_task.adaptive_cfg),
-                    text_encoder_override=async_task.zit_text_encoder,
-                    vae_override=async_task.zit_vae,
+                task_rng = random.Random(task_seed)
+                task_prompt = apply_dynamic_prompts(
+                    apply_wildcards(async_task.prompt, task_rng, i, async_task.read_wildcards_in_order),
+                    task_rng,
                 )
-                np_image = np.array(pil_image)
-            except ModuleNotFoundError as e:
-                progressbar(async_task, 100, f'Z-Image POC requires missing dependency: {e}')
-                print('[Z-Image POC] Install required dependencies with:')
-                print('  python -m pip install -r requirements_versions.txt')
-                return
-            except Exception as e:
-                progressbar(async_task, 100, f'Z-Image generation failed: {e}')
-                print(f'[Z-Image POC] Generation failed: {e}')
-                return
+                task_negative_prompt = apply_dynamic_prompts(
+                    apply_wildcards(async_task.negative_prompt, task_rng, i, async_task.read_wildcards_in_order),
+                    task_rng,
+                )
 
-            task = dict(
-                task_seed=task_seed,
-                log_positive_prompt=task_prompt,
-                log_negative_prompt=task_negative_prompt,
-                expansion='',
-                styles=[],
-                positive=[task_prompt],
-                negative=[task_negative_prompt],
-            )
-            progress = int((i + 1) * 100 / float(max(async_task.image_number, 1)))
-            img_paths = save_and_log(async_task, height, [np_image], task, False, width, [], persist_image=True)
-            yield_result(async_task, img_paths, progress, async_task.black_out_nsfw, False,
-                         do_not_show_finished_images=async_task.disable_intermediate_results)
+                progressbar(async_task, current_progress, f'Generating Z-Image {i + 1}/{async_task.image_number} ...')
+                try:
+                    pil_image = modules.zimage_poc.generate_zimage(
+                        source_kind=source_kind,
+                        source_path=source_path,
+                        flavor=flavor,
+                        checkpoint_folders=modules.config.paths_checkpoints,
+                        prompt=task_prompt,
+                        negative_prompt=task_negative_prompt,
+                        width=width,
+                        height=height,
+                        steps=async_task.steps,
+                        guidance_scale=float(async_task.cfg_scale),
+                        seed=task_seed,
+                        shift=float(async_task.adaptive_cfg),
+                        text_encoder_override=async_task.zit_text_encoder,
+                        vae_override=async_task.zit_vae,
+                    )
+                    np_image = np.array(pil_image)
+                except ModuleNotFoundError as e:
+                    progressbar(async_task, 100, f'Z-Image POC requires missing dependency: {e}')
+                    print('[Z-Image POC] Install required dependencies with:')
+                    print('  python -m pip install -r requirements_versions.txt')
+                    return
+                except Exception as e:
+                    progressbar(async_task, 100, f'Z-Image generation failed: {e}')
+                    print(f'[Z-Image POC] Generation failed: {e}')
+                    return
+
+                task = dict(
+                    task_seed=task_seed,
+                    log_positive_prompt=task_prompt,
+                    log_negative_prompt=task_negative_prompt,
+                    expansion='',
+                    styles=[],
+                    positive=[task_prompt],
+                    negative=[task_negative_prompt],
+                )
+                progress = int((i + 1) * 100 / float(max(async_task.image_number, 1)))
+                img_paths = save_and_log(async_task, height, [np_image], task, False, width, [], persist_image=True)
+                yield_result(async_task, img_paths, progress, async_task.black_out_nsfw, False,
+                             do_not_show_finished_images=async_task.disable_intermediate_results)
+        finally:
+            if unloaded_standard_models:
+                try:
+                    stats = modules.zimage_poc.clear_runtime_caches(flush_cuda=True, aggressive=True)
+                    ldm_patched.modules.model_management.soft_empty_cache(force=True)
+                    print(
+                        "[Z-Image POC] Released Z-Image runtime cache after unload mode: "
+                        f"pipelines={stats.get('pipelines', 0)}, prompt_cache_entries={stats.get('prompt_cache_entries', 0)}."
+                    )
+                except Exception as e:
+                    print(f'[Z-Image POC] Warning: failed to release Z-Image runtime cache: {e}')
 
     def apply_image_input(async_task, base_model_additional_loras, clip_vision_path, controlnet_canny_path,
                           controlnet_cpds_path, goals, inpaint_head_model_path, inpaint_image, inpaint_mask,
@@ -1650,7 +1662,21 @@ def worker():
                 if task.generate_image_grid:
                     build_image_wall(task)
                 task.yields.append(['finish', task.results])
-                pipeline.prepare_text_encoder(async_call=True)
+                is_zimage_task = False
+                try:
+                    base_model_name = getattr(task, 'base_model_name', None)
+                    if isinstance(base_model_name, str) and base_model_name.strip() != '':
+                        is_zimage_task = modules.zimage_poc.should_use_zimage_checkpoint(
+                            base_model_name,
+                            modules.config.paths_checkpoints,
+                        )
+                except Exception as e:
+                    print(f'[Z-Image POC] Warning: unable to detect task model type at teardown: {e}')
+
+                if is_zimage_task:
+                    print('[Z-Image POC] Skipping SDXL text/expansion warmup for Z-Image task.')
+                else:
+                    pipeline.prepare_text_encoder(async_call=True)
             except:
                 traceback.print_exc()
                 task.yields.append(['finish', task.results])

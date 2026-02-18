@@ -64,6 +64,33 @@ def _cleanup_memory(cuda: bool = True, aggressive: bool = True) -> None:
         pass
 
 
+def clear_runtime_caches(flush_cuda: bool = True, aggressive: bool = True) -> dict:
+    released_pipelines = 0
+    prompt_cache_entries = len(_PROMPT_EMBED_CACHE)
+
+    for _, cached in list(_PIPELINE_CACHE.items()):
+        if not isinstance(cached, tuple) or len(cached) < 1:
+            continue
+        pipeline = cached[0]
+        released_pipelines += 1
+        try:
+            if hasattr(pipeline, "maybe_free_model_hooks"):
+                pipeline.maybe_free_model_hooks()
+        except Exception:
+            pass
+        try:
+            if hasattr(pipeline, "to"):
+                pipeline.to("cpu")
+        except Exception:
+            # Some offload/meta-backed modules cannot be moved directly; hook cleanup above is enough.
+            pass
+
+    _PIPELINE_CACHE.clear()
+    _PROMPT_EMBED_CACHE.clear()
+    _cleanup_memory(cuda=flush_cuda, aggressive=aggressive)
+    return {"pipelines": released_pipelines, "prompt_cache_entries": prompt_cache_entries}
+
+
 def _cuda_mem_info_gb() -> tuple[float, float]:
     try:
         import torch
