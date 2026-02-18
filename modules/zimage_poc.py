@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import gc
 import re
+import time
 from typing import Optional
 
 
@@ -167,6 +168,16 @@ def _zimage_perf_profile() -> str:
     if profile not in ("safe", "balanced", "speed"):
         return "safe"
     return profile
+
+
+def _zimage_stage_timers_enabled() -> bool:
+    return _truthy_env("FOOOCUS_ZIMAGE_STAGE_TIMERS", "0")
+
+
+def _format_timing_ms(value: Optional[float]) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value * 1000.0:.1f}ms"
 
 
 def _zimage_xformers_mode() -> str:
@@ -2773,10 +2784,19 @@ def generate_zimage(
 ):
     import torch
 
+    stage_timers = _zimage_stage_timers_enabled()
+    total_start = time.perf_counter()
+    stage_times: dict[str, float] = {}
+    embed_cache_hit = False
+    generation_attempts = 0
+    error_name = ""
+
+    stage_start = time.perf_counter()
     resolved_text_encoder_override = resolve_zimage_component_path(
         text_encoder_override, "text_encoder", checkpoint_folders
     )
     resolved_vae_override = resolve_zimage_component_path(vae_override, "vae", checkpoint_folders)
+    stage_times["resolve_overrides"] = time.perf_counter() - stage_start
     cache_key = _pipeline_cache_key(
         source_kind,
         source_path,
@@ -2784,6 +2804,7 @@ def generate_zimage(
         vae_override=resolved_vae_override,
     )
     profile = _zimage_perf_profile()
+    stage_start = time.perf_counter()
     pipeline, generator_device, used_offload = _load_pipeline(
         source_kind,
         source_path,
@@ -2794,6 +2815,7 @@ def generate_zimage(
     )
     if generator_device == "cuda" and _should_cleanup_cuda_cache(profile, had_oom=False, pipeline=pipeline):
         _cleanup_memory(cuda=True, aggressive=False)
+    stage_times["pipeline_load"] = time.perf_counter() - stage_start
 
     # Align scheduler shift with Forge-style "Shift" control when available.
     try:
@@ -2821,6 +2843,7 @@ def generate_zimage(
     if forced_max_seq is not None:
         hard_cap = min(hard_cap, int(forced_max_seq))
 
+    stage_start = time.perf_counter()
     max_sequence_length = hard_cap
     if flavor == "turbo" and _truthy_env("FOOOCUS_ZIMAGE_DYNAMIC_MAX_SEQ", "1"):
         max_sequence_length = _compute_auto_max_sequence_length(
@@ -2862,6 +2885,7 @@ def generate_zimage(
         flavor=flavor,
     )
     generator = torch.Generator(device=generator_device).manual_seed(seed)
+    stage_times["runtime_prep"] = time.perf_counter() - stage_start
 
     neg_key = negative_prompt if use_cfg else ""
     embed_cache_key = (
@@ -2872,9 +2896,11 @@ def generate_zimage(
         bool(use_cfg),
     )
 
+    stage_start = time.perf_counter()
     prompt_embeds = None
     negative_prompt_embeds = None
     cached_embeds = _PROMPT_EMBED_CACHE.get(embed_cache_key, None)
+    embed_cache_hit = cached_embeds is not None
     if cached_embeds is not None:
         cached_pos, cached_neg = cached_embeds
         prompt_embeds = [x.to(device=generator_device, dtype=pipeline.transformer.dtype) for x in cached_pos]
@@ -2898,6 +2924,7 @@ def generate_zimage(
             negative_prompt_embeds = [x.to(device=generator_device, dtype=pipeline.transformer.dtype) for x in cpu_neg]
         else:
             negative_prompt_embeds = []
+    stage_times["prompt_encode"] = time.perf_counter() - stage_start
 
     call_kwargs = dict(
         prompt=None,
@@ -2920,6 +2947,7 @@ def generate_zimage(
     )
 
     output = None
+    call_start = time.perf_counter()
     try:
         retry_caps = []
         retry_sizes = []
@@ -2940,6 +2968,7 @@ def generate_zimage(
 
         max_attempts = 4 if flavor == "turbo" else 3
         for attempt in range(max_attempts):
+            generation_attempts = attempt + 1
             try:
                 output = _run_pipeline_call(pipeline, call_kwargs)
                 break
@@ -3006,16 +3035,23 @@ def generate_zimage(
 
         if output is None:
             raise RuntimeError("Z-Image generation failed after OOM retries.")
+        stage_times["pipeline_call"] = time.perf_counter() - call_start
 
+        stage_start = time.perf_counter()
         image = output.images[0]
         del output
+        stage_times["extract_image"] = time.perf_counter() - stage_start
         return image
-    except Exception:
+    except Exception as e:
+        error_name = type(e).__name__
+        if "pipeline_call" not in stage_times:
+            stage_times["pipeline_call"] = time.perf_counter() - call_start
         # Prevent poisoned/corrupted cache from breaking next generation request.
         _PIPELINE_CACHE.pop(cache_key, None)
         _clear_prompt_cache_for_pipeline(cache_key)
         raise
     finally:
+        cleanup_start = time.perf_counter()
         try:
             # Ensure accelerate offload hooks release device-resident weights between images.
             if hasattr(pipeline, "maybe_free_model_hooks"):
@@ -3034,3 +3070,19 @@ def generate_zimage(
                 _cleanup_memory(cuda=True, aggressive=had_oom)
         else:
             _cleanup_memory(cuda=False, aggressive=had_oom)
+        stage_times["cleanup"] = time.perf_counter() - cleanup_start
+        if stage_timers:
+            total_elapsed = time.perf_counter() - total_start
+            status = "ok" if not error_name else f"error={error_name}"
+            embed_status = "hit" if embed_cache_hit else "miss"
+            print(
+                f"[Z-Image POC] Stage timings ({status}, embed_cache={embed_status}, attempts={generation_attempts}): "
+                f"resolve={_format_timing_ms(stage_times.get('resolve_overrides'))}, "
+                f"load={_format_timing_ms(stage_times.get('pipeline_load'))}, "
+                f"prepare={_format_timing_ms(stage_times.get('runtime_prep'))}, "
+                f"encode={_format_timing_ms(stage_times.get('prompt_encode'))}, "
+                f"infer={_format_timing_ms(stage_times.get('pipeline_call'))}, "
+                f"extract={_format_timing_ms(stage_times.get('extract_image'))}, "
+                f"cleanup={_format_timing_ms(stage_times.get('cleanup'))}, "
+                f"total={_format_timing_ms(total_elapsed)}"
+            )
