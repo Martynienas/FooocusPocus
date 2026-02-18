@@ -28,7 +28,7 @@ from modules.model_loader import load_file_from_url
 
 REINSTALL_ALL = False
 TRY_INSTALL_XFORMERS = True
-TRY_INSTALL_FLASH_ATTN = os.environ.get("TRY_INSTALL_FLASH_ATTN", "1").strip().lower() in ("1", "true", "yes", "on")
+TRY_INSTALL_FLASH_ATTN = os.environ.get("TRY_INSTALL_FLASH_ATTN", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 def torch_stack_is_compatible(min_torch_version: str = "2.2.0") -> bool:
@@ -391,10 +391,21 @@ def prepare_environment():
         if _installed_dist_version("flash-attn") is not None and not _flash_attn_runtime_healthy():
             print("flash-attn package is installed but runtime import failed; continuing with fallback attention backends.")
 
-    if "FOOOCUS_ZIMAGE_ATTN_BACKEND" not in os.environ:
-        # Prefer FlashAttention 2 path by default, with runtime fallback in zimage_poc.
-        os.environ["FOOOCUS_ZIMAGE_ATTN_BACKEND"] = "flash2"
-        print("Set default Z-Image attention backend: FOOOCUS_ZIMAGE_ATTN_BACKEND=flash2")
+    zimage_default_env = {
+        # Tuned defaults for stable, fast Z-Image runs on ~12GB VRAM cards.
+        "FOOOCUS_ZIMAGE_ATTN_BACKEND": "auto",
+        "FOOOCUS_ZIMAGE_UNLOAD_STANDARD_MODELS": "1",
+        "FOOOCUS_ZIMAGE_RESERVE_VRAM_GB": "2.2",
+        "FOOOCUS_ZIMAGE_PERF_PROFILE": "speed",
+        "FOOOCUS_ZIMAGE_ALLOW_QUALITY_FALLBACK": "0",
+    }
+    applied_defaults = []
+    for key, value in zimage_default_env.items():
+        if key not in os.environ:
+            os.environ[key] = value
+            applied_defaults.append(f"{key}={value}")
+    if applied_defaults:
+        print("Set default Z-Image runtime env: " + ", ".join(applied_defaults))
 
     if REINSTALL_ALL or not requirements_met(requirements_file):
         run_pip(f"install -r \"{requirements_file}\"", "requirements")
