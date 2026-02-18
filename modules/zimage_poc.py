@@ -1741,6 +1741,115 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
         else:
             raise RuntimeError(f"Unsupported override weights format: {file_path}")
 
+    def _decode_fp4_e2m1_packed_u8(packed: torch.Tensor) -> torch.Tensor:
+        # Comfy packs two fp4 values per byte as:
+        # packed = (fp4_even << 4) | fp4_odd
+        if packed.dtype != torch.uint8:
+            packed = packed.to(torch.uint8)
+        hi = (packed >> 4) & 0x0F
+        lo = packed & 0x0F
+        unpacked = torch.empty((packed.shape[0], packed.shape[1] * 2), dtype=torch.uint8, device=packed.device)
+        unpacked[:, 0::2] = hi
+        unpacked[:, 1::2] = lo
+
+        # fp4 e2m1 decode table mirrored from Comfy float quantizer behavior.
+        table = torch.tensor(
+            [
+                0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+                -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+            ],
+            dtype=torch.float32,
+            device=packed.device,
+        )
+        return table[unpacked.long()]
+
+    def _from_blocked_scales(blocked: torch.Tensor) -> torch.Tensor:
+        # Inverse of Comfy's to_blocked(...) layout used for NVFP4 block scales.
+        if blocked.ndim != 2:
+            return blocked
+        rows, cols = blocked.shape
+        if rows % 128 != 0 or cols % 4 != 0:
+            return blocked
+        n_row_blocks = rows // 128
+        n_col_blocks = cols // 4
+        e = blocked.reshape(n_row_blocks * n_col_blocks, 32, 16)
+        d = e.reshape(n_row_blocks * n_col_blocks, 32, 4, 4)
+        c = d.transpose(1, 2)
+        b = c.reshape(n_row_blocks, n_col_blocks, 128, 4)
+        a = b.permute(0, 2, 1, 3)
+        return a.reshape(rows, cols)
+
+    def _decode_comfy_quant_entry(raw: torch.Tensor) -> Optional[dict]:
+        try:
+            return json.loads(raw.detach().cpu().numpy().tobytes().decode("utf-8"))
+        except Exception:
+            return None
+
+    def _dequantize_comfy_mixed_weights(sd: dict) -> tuple[dict, dict]:
+        quant_entries = {}
+        for key in list(sd.keys()):
+            if not key.endswith(".comfy_quant"):
+                continue
+            base = key[: -len(".comfy_quant")]
+            conf = _decode_comfy_quant_entry(sd[key])
+            if isinstance(conf, dict):
+                quant_entries[base] = conf
+
+        if not quant_entries:
+            return sd, {"layers": 0, "float8": 0, "nvfp4": 0}
+
+        converted = dict(sd)
+        stats = {"layers": 0, "float8": 0, "nvfp4": 0}
+        for base, conf in quant_entries.items():
+            fmt = str(conf.get("format", "")).lower()
+            weight_key = f"{base}.weight"
+            if weight_key not in converted:
+                continue
+
+            if fmt in ("float8_e4m3fn", "float8_e5m2"):
+                weight = converted[weight_key].float()
+                scale = converted.get(f"{base}.weight_scale", None)
+                if scale is not None:
+                    weight = weight * scale.float()
+                converted[weight_key] = weight.to(torch.bfloat16)
+                stats["float8"] += 1
+                stats["layers"] += 1
+            elif fmt == "nvfp4":
+                packed = converted[weight_key]
+                block_scale = converted.get(f"{base}.weight_scale", None)
+                tensor_scale = converted.get(f"{base}.weight_scale_2", None)
+                if block_scale is None or tensor_scale is None:
+                    raise RuntimeError(
+                        f"NVFP4 layer '{base}' is missing weight_scale/weight_scale_2."
+                    )
+                deq = _decode_fp4_e2m1_packed_u8(packed)
+                per_block = _from_blocked_scales(block_scale.float())
+                expanded_scale = per_block.repeat_interleave(16, dim=1) * tensor_scale.float()
+                if deq.shape != expanded_scale.shape:
+                    raise RuntimeError(
+                        f"NVFP4 shape mismatch in '{base}': values={tuple(deq.shape)} scales={tuple(expanded_scale.shape)}"
+                    )
+                converted[weight_key] = (deq * expanded_scale).to(torch.bfloat16)
+                stats["nvfp4"] += 1
+                stats["layers"] += 1
+            else:
+                raise RuntimeError(f"Unsupported Comfy quant format '{fmt}' in '{base}'.")
+
+            # Remove quant side tensors after dequantization.
+            for suffix in (".comfy_quant", ".weight_scale", ".weight_scale_2", ".input_scale", ".scale_input", ".scale_weight"):
+                converted.pop(f"{base}{suffix}", None)
+
+        # Remove legacy global scaled-fp8 marker if present.
+        converted.pop("scaled_fp8", None)
+        return converted, stats
+
+    state_dict, quant_stats = _dequantize_comfy_mixed_weights(state_dict)
+    if quant_stats.get("layers", 0) > 0:
+        print(
+            f"[Z-Image POC] Dequantized Comfy mixed weights for {component_name}: "
+            f"layers={quant_stats['layers']}, fp8={quant_stats['float8']}, nvfp4={quant_stats['nvfp4']}."
+        )
+
     model_keys = set(component.state_dict().keys())
     source_key_count = len(state_dict)
     direct_match_count = 0
