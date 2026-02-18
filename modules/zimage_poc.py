@@ -1742,19 +1742,43 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
             raise RuntimeError(f"Unsupported override weights format: {file_path}")
 
     model_keys = set(component.state_dict().keys())
+    source_key_count = len(state_dict)
+    direct_match_count = 0
+    for key in state_dict.keys():
+        if key in model_keys:
+            direct_match_count += 1
+    print(
+        f"[Z-Image POC] {component_name} file override key probe: "
+        f"source={source_key_count}, direct_matches={direct_match_count}, model_keys={len(model_keys)}"
+    )
     remapped = _remap_state_dict_to_model_keys(
         state_dict,
         model_keys,
         f"{component_name}-file-override",
         verbose=True,
     )
-    _apply_component_state_dict(
+    remapped_match_count = sum(1 for key in remapped.keys() if key in model_keys)
+    missing, unexpected = _apply_component_state_dict(
         component,
         remapped,
         label=f"{component_name} file override ({os.path.basename(file_path)})",
         missing_limit=None,
         unexpected_limit=None,
     )
+    # Guardrail: avoid silent garbage generations when incompatible quantized files are selected.
+    if model_keys:
+        missing_ratio = len(missing) / float(len(model_keys))
+    else:
+        missing_ratio = 0.0
+    unexpected_ratio = len(unexpected) / float(max(len(remapped), 1))
+    remap_ratio = remapped_match_count / float(max(source_key_count, 1))
+    if remap_ratio < 0.65 or missing_ratio > 0.35 or unexpected_ratio > 0.35:
+        raise RuntimeError(
+            f"Incompatible {component_name} override file '{os.path.basename(file_path)}': "
+            f"remap_match={remap_ratio:.1%}, missing={len(missing)} ({missing_ratio:.1%}), "
+            f"unexpected={len(unexpected)} ({unexpected_ratio:.1%}). "
+            "Use a compatible full-precision component or the default component folder."
+        )
     print(f"[Z-Image POC] Using override {component_name} file: {file_path}")
     state_dict.clear()
     remapped.clear()

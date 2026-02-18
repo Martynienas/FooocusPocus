@@ -923,6 +923,7 @@ def worker():
             return
 
         print(f'[Z-Image POC] Source: {source_kind} @ {source_path}')
+        print(f"[Z-Image POC] Overrides: text_encoder={async_task.zit_text_encoder}, vae={async_task.zit_vae}")
 
         unsupported = []
         if async_task.input_image_checkbox:
