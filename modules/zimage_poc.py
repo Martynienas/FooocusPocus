@@ -394,6 +394,9 @@ def _zimage_component_choice_pairs(component_name: str, checkpoint_folders: list
         rel = _human_component_path(entry, checkpoint_folders)
         weight_files = _component_weight_files(entry)
         _push_choice(f"{rel} [default]", entry)
+        if component_name == "vae":
+            # Single-file VAE overrides are often architecture-incompatible; keep UI on folder/default choices.
+            continue
         for filename in weight_files:
             _push_choice(f"{rel} :: {filename}", os.path.abspath(os.path.join(entry, filename)))
     return pairs
@@ -2002,7 +2005,11 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
                 return None
 
         def _runtime_weight(self, x: torch.Tensor):
-            dtype = x.dtype if x.dtype in (torch.float16, torch.bfloat16, torch.float32) else self.compute_dtype
+            force_lowp = _truthy_env("FOOOCUS_ZIMAGE_COMFY_RUNTIME_LOWP", "1")
+            if self.quant_format is not None and force_lowp:
+                dtype = self.compute_dtype if self.compute_dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
+            else:
+                dtype = x.dtype if x.dtype in (torch.float16, torch.bfloat16, torch.float32) else self.compute_dtype
             device_key = str(x.device)
             dtype_key = str(dtype)
             if self._cache_enabled():
@@ -2023,7 +2030,11 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
         def forward(self, input: torch.Tensor):
             input_shape = input.shape
             x = input.reshape(-1, input_shape[-1]) if input.ndim > 2 else input
-            compute_dtype = x.dtype if x.dtype in (torch.float16, torch.bfloat16, torch.float32) else self.compute_dtype
+            force_lowp = _truthy_env("FOOOCUS_ZIMAGE_COMFY_RUNTIME_LOWP", "1")
+            if self.quant_format is not None and force_lowp:
+                compute_dtype = self.compute_dtype if self.compute_dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
+            else:
+                compute_dtype = x.dtype if x.dtype in (torch.float16, torch.bfloat16, torch.float32) else self.compute_dtype
             x = x.to(dtype=compute_dtype)
 
             output = self._try_fp8_direct_linear(x)
@@ -2105,6 +2116,51 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
             "nvfp4": nvfp4_layers,
         }
 
+    def _normalize_legacy_scaled_fp8_weights(sd: dict) -> tuple[dict, dict]:
+        converted = dict(sd)
+        migrated = 0
+        quant_bases = set()
+        for key in list(converted.keys()):
+            if key.endswith(".scale_weight"):
+                base = key[: -len(".scale_weight")]
+                converted[f"{base}.weight_scale"] = converted.pop(key)
+                quant_bases.add(base)
+                migrated += 1
+                continue
+            if key.endswith(".scale_input"):
+                base = key[: -len(".scale_input")]
+                converted[f"{base}.input_scale"] = converted.pop(key)
+                quant_bases.add(base)
+                migrated += 1
+
+        if migrated == 0:
+            return sd, {"migrated": 0, "created_quant_entries": 0}
+
+        created_quant_entries = 0
+        for base in quant_bases:
+            weight_key = f"{base}.weight"
+            scale_key = f"{base}.weight_scale"
+            if weight_key not in converted or scale_key not in converted:
+                continue
+            if f"{base}.comfy_quant" in converted:
+                continue
+            weight = converted[weight_key]
+            fmt = None
+            fp8_e4m3 = getattr(torch, "float8_e4m3fn", None)
+            fp8_e5m2 = getattr(torch, "float8_e5m2", None)
+            if fp8_e4m3 is not None and getattr(weight, "dtype", None) == fp8_e4m3:
+                fmt = "float8_e4m3fn"
+            elif fp8_e5m2 is not None and getattr(weight, "dtype", None) == fp8_e5m2:
+                fmt = "float8_e5m2"
+            if fmt is None:
+                continue
+            payload = torch.tensor(list(json.dumps({"format": fmt}).encode("utf-8")), dtype=torch.uint8)
+            converted[f"{base}.comfy_quant"] = payload
+            created_quant_entries += 1
+
+        converted.pop("scaled_fp8", None)
+        return converted, {"migrated": migrated, "created_quant_entries": created_quant_entries}
+
     def _dequantize_comfy_mixed_weights(sd: dict) -> tuple[dict, dict]:
         quant_entries = {}
         for key in list(sd.keys()):
@@ -2162,6 +2218,13 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
         # Remove legacy global scaled-fp8 marker if present.
         converted.pop("scaled_fp8", None)
         return converted, stats
+
+    state_dict, legacy_stats = _normalize_legacy_scaled_fp8_weights(state_dict)
+    if legacy_stats.get("migrated", 0) > 0:
+        print(
+            f"[Z-Image POC] Normalized legacy scaled FP8 keys for {component_name}: "
+            f"migrated={legacy_stats['migrated']}, quant_entries={legacy_stats['created_quant_entries']}."
+        )
 
     model_keys = set(component.state_dict().keys())
     probe_source_key_count = len(state_dict)
@@ -2227,6 +2290,17 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
                     remapped_match_count += 1
                 break
     source_key_count = len(remapped)
+
+    if component_name == "vae":
+        precheck_ratio = remapped_match_count / float(max(source_key_count, 1))
+        if precheck_ratio < 0.35:
+            print(
+                f"[Z-Image POC] Skipping incompatible vae override file '{os.path.basename(file_path)}' "
+                f"(precheck remap_match={precheck_ratio:.1%}); using model default VAE."
+            )
+            state_dict.clear()
+            remapped.clear()
+            return
 
     missing, unexpected = _apply_component_state_dict(
         component,
@@ -2616,7 +2690,7 @@ def generate_zimage(
         retry_caps = []
         if flavor == "turbo":
             current_seq = int(call_kwargs.get("max_sequence_length", 256))
-            for candidate in (192, 160, 128):
+            for candidate in (192, 160, 128, 96, 64, 32):
                 if current_seq > candidate:
                     retry_caps.append(candidate)
 
