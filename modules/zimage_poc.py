@@ -5,6 +5,8 @@ import importlib
 import gc
 import re
 import time
+import ctypes
+import ctypes.util
 from typing import Optional
 
 
@@ -261,6 +263,7 @@ def _put_prompt_cache(key: tuple, value: tuple) -> None:
 def _cleanup_memory(cuda: bool = True, aggressive: bool = True) -> None:
     if aggressive:
         gc.collect()
+        _trim_process_heap()
     if not cuda:
         return
     try:
@@ -270,6 +273,20 @@ def _cleanup_memory(cuda: bool = True, aggressive: bool = True) -> None:
             torch.cuda.empty_cache()
             if aggressive and hasattr(torch.cuda, "ipc_collect"):
                 torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
+
+def _trim_process_heap() -> None:
+    # Release glibc free pages back to OS to reduce RSS spikes on model switches.
+    if os.name != "posix":
+        return
+    try:
+        libc_name = ctypes.util.find_library("c") or "libc.so.6"
+        libc = ctypes.CDLL(libc_name)
+        trim = getattr(libc, "malloc_trim", None)
+        if callable(trim):
+            trim(0)
     except Exception:
         pass
 
@@ -289,6 +306,27 @@ def clear_runtime_caches(flush_cuda: bool = True, aggressive: bool = True) -> di
                 pipeline.maybe_free_model_hooks()
         except Exception:
             pass
+        try:
+            remove_all_hooks = getattr(pipeline, "remove_all_hooks", None)
+            if callable(remove_all_hooks):
+                remove_all_hooks()
+        except Exception:
+            pass
+        # Break strong references from pipeline objects to large modules early.
+        for attr in (
+            "transformer",
+            "text_encoder",
+            "text_encoder_2",
+            "vae",
+            "tokenizer",
+            "tokenizer_2",
+            "scheduler",
+        ):
+            try:
+                if hasattr(pipeline, attr):
+                    setattr(pipeline, attr, None)
+            except Exception:
+                pass
         # Keep this opt-in: forcing `pipeline.to("cpu")` can create transient RAM spikes
         # with very large text encoders during model switches.
         if move_to_cpu_on_clear:
@@ -298,6 +336,10 @@ def clear_runtime_caches(flush_cuda: bool = True, aggressive: bool = True) -> di
             except Exception:
                 # Some offload/meta-backed modules cannot be moved directly; hook cleanup above is enough.
                 pass
+        try:
+            del pipeline
+        except Exception:
+            pass
 
     _PIPELINE_CACHE.clear()
     _PROMPT_EMBED_CACHE.clear()
