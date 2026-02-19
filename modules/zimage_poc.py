@@ -433,6 +433,10 @@ def _zimage_compute_dtype_mode() -> str:
     return mode
 
 
+def _zimage_strict_fp16_mode() -> bool:
+    return _zimage_compute_dtype_mode() == "fp16"
+
+
 def _zimage_prewarm_enabled() -> bool:
     return _truthy_env("FOOOCUS_ZIMAGE_PREWARM", "0")
 
@@ -547,6 +551,35 @@ def _is_suspected_black_image(image) -> tuple[bool, Optional[dict]]:
     mean_cap = float(_zimage_black_image_mean_threshold())
     is_black = info["max"] <= max_cap and info["mean"] <= mean_cap
     return is_black, info
+
+
+def _retune_runtime_quant_modules_dtype(root_module, dtype) -> int:
+    if root_module is None:
+        return 0
+    changed = 0
+    try:
+        modules_iter = root_module.modules()
+    except Exception:
+        modules_iter = []
+    for module in modules_iter:
+        if not hasattr(module, "compute_dtype"):
+            continue
+        if not hasattr(module, "quant_format"):
+            continue
+        old_dtype = getattr(module, "compute_dtype", None)
+        try:
+            module.compute_dtype = dtype
+            if old_dtype != dtype:
+                changed += 1
+        except Exception:
+            continue
+        clear_cache = getattr(module, "_clear_cache", None)
+        if callable(clear_cache):
+            try:
+                clear_cache()
+            except Exception:
+                pass
+    return changed
 
 
 def _warn_once_env(key: str, message: str) -> None:
@@ -4020,7 +4053,19 @@ def generate_zimage(
                         if is_black:
                             black_retry_used = True
                             strategy = str(getattr(pipeline, "_zimage_xformers_strategy", "unknown"))
-                            transformer_dtype = str(getattr(getattr(pipeline, "transformer", None), "dtype", "n/a"))
+                            transformer = getattr(pipeline, "transformer", None)
+                            transformer_dtype_obj = getattr(transformer, "dtype", None)
+                            transformer_dtype = str(transformer_dtype_obj)
+                            strict_fp16 = _zimage_strict_fp16_mode() and transformer_dtype_obj == torch.float16
+                            if strict_fp16:
+                                print(
+                                    f"[Z-Image POC] Suspected black output detected "
+                                    f"(mean={black_info['mean']:.2f}, max={black_info['max']:.0f}, std={black_info['std']:.2f}, "
+                                    f"attn={strategy}, dtype={transformer_dtype}). Strict FP16 mode enabled; no fallback."
+                                )
+                                raise RuntimeError(
+                                    "Suspected black output in strict FP16 mode; refusing automatic fallback."
+                                )
                             print(
                                 f"[Z-Image POC] Suspected black output detected "
                                 f"(mean={black_info['mean']:.2f}, max={black_info['max']:.0f}, std={black_info['std']:.2f}, "
@@ -4028,7 +4073,6 @@ def generate_zimage(
                             )
 
                             changed = []
-                            transformer = getattr(pipeline, "transformer", None)
                             if transformer is not None and hasattr(transformer, "set_attention_backend"):
                                 # Flash can occasionally produce pathological outputs on some builds.
                                 if "flash" in strategy:
@@ -4042,9 +4086,8 @@ def generate_zimage(
                                             continue
 
                             # If user forced fp16 and model behaves badly, attempt one safer dtype retry.
-                            import torch
-                            transformer_dtype_obj = getattr(transformer, "dtype", None)
                             if transformer_dtype_obj == torch.float16 and torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+                                quant_dtype_updates = 0
                                 for module_name in ("transformer", "text_encoder", "vae"):
                                     module = getattr(pipeline, module_name, None)
                                     if module is not None and hasattr(module, "to"):
@@ -4052,7 +4095,8 @@ def generate_zimage(
                                             module.to(dtype=torch.bfloat16)
                                         except Exception:
                                             pass
-                                new_dtype = getattr(getattr(pipeline, "transformer", None), "dtype", torch.bfloat16)
+                                    quant_dtype_updates += _retune_runtime_quant_modules_dtype(module, torch.bfloat16)
+                                new_dtype = torch.bfloat16
                                 call_kwargs["prompt_embeds"] = [
                                     x.to(device=generator_device, dtype=new_dtype) for x in call_kwargs.get("prompt_embeds", [])
                                 ]
@@ -4060,12 +4104,21 @@ def generate_zimage(
                                     x.to(device=generator_device, dtype=new_dtype) for x in call_kwargs.get("negative_prompt_embeds", [])
                                 ]
                                 changed.append("dtype=bf16")
+                                if quant_dtype_updates:
+                                    changed.append(f"runtime_quant_dtype={quant_dtype_updates}")
 
                             if changed:
                                 if generator_device == "cuda":
                                     _cleanup_memory(cuda=True, aggressive=True)
                                 call_kwargs["generator"] = torch.Generator(device=generator_device).manual_seed(seed)
-                                output = _run_pipeline_call(pipeline, call_kwargs)
+                                original_output = output
+                                try:
+                                    output = _run_pipeline_call(pipeline, call_kwargs)
+                                except Exception as retry_error:
+                                    output = original_output
+                                    print(
+                                        f"[Z-Image POC] Black-image retry failed ({retry_error}); keeping original output."
+                                    )
                                 try:
                                     retry_image = output.images[0]
                                     retry_black, retry_info = _is_suspected_black_image(retry_image)
