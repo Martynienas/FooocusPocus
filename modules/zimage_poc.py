@@ -2550,6 +2550,17 @@ def _load_component_override_from_file(
             self._cached_weight_device: Optional[str] = None
             self._cached_weight_dtype: Optional[str] = None
 
+        @property
+        def weight(self) -> torch.Tensor:
+            # Compatibility shim: some external/offload paths still probe
+            # module.weight.{device,dtype} even for custom Linear-like modules.
+            if self._dense_weight is not None:
+                return self._dense_weight
+            if self._quant_weight is not None:
+                return self._quant_weight
+            # Keep attribute contract even during transient init states.
+            return torch.empty(0, dtype=self.compute_dtype)
+
         @classmethod
         def from_linear(cls, linear_module: torch.nn.Linear):
             compute_dtype = getattr(linear_module.weight, "dtype", torch.bfloat16)
