@@ -277,6 +277,7 @@ def _cleanup_memory(cuda: bool = True, aggressive: bool = True) -> None:
 def clear_runtime_caches(flush_cuda: bool = True, aggressive: bool = True) -> dict:
     released_pipelines = 0
     prompt_cache_entries = len(_PROMPT_EMBED_CACHE)
+    move_to_cpu_on_clear = _truthy_env("FOOOCUS_ZIMAGE_CACHE_CLEAR_MOVE_TO_CPU", "0")
 
     for _, cached in list(_PIPELINE_CACHE.items()):
         if not isinstance(cached, tuple) or len(cached) < 1:
@@ -288,12 +289,15 @@ def clear_runtime_caches(flush_cuda: bool = True, aggressive: bool = True) -> di
                 pipeline.maybe_free_model_hooks()
         except Exception:
             pass
-        try:
-            if hasattr(pipeline, "to"):
-                pipeline.to("cpu")
-        except Exception:
-            # Some offload/meta-backed modules cannot be moved directly; hook cleanup above is enough.
-            pass
+        # Keep this opt-in: forcing `pipeline.to("cpu")` can create transient RAM spikes
+        # with very large text encoders during model switches.
+        if move_to_cpu_on_clear:
+            try:
+                if hasattr(pipeline, "to"):
+                    pipeline.to("cpu")
+            except Exception:
+                # Some offload/meta-backed modules cannot be moved directly; hook cleanup above is enough.
+                pass
 
     _PIPELINE_CACHE.clear()
     _PROMPT_EMBED_CACHE.clear()
