@@ -2674,6 +2674,134 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
 
             raise RuntimeError(f"Unknown quant format '{self.quant_format}'.")
 
+        def _resolve_scalar_scale(self, scale_tensor: Optional[torch.Tensor], device: torch.device) -> Optional[torch.Tensor]:
+            if scale_tensor is None:
+                return torch.ones((), device=device, dtype=torch.float32)
+            try:
+                scale = scale_tensor.to(device=device, dtype=torch.float32)
+            except Exception:
+                return None
+            if scale.numel() != 1:
+                return None
+            return scale.reshape(())
+
+        def _apply_weight_scale(self, output: torch.Tensor, device: torch.device) -> Optional[torch.Tensor]:
+            scale = self._weight_scale
+            if scale is None:
+                return output
+            try:
+                scale = scale.to(device=device, dtype=output.dtype)
+            except Exception:
+                return None
+            if scale.ndim == 0:
+                return output * scale
+            if scale.ndim == 1 and scale.shape[0] == self.out_features:
+                return output * scale.view(1, -1)
+            if scale.ndim == 2 and scale.shape == (self.out_features, 1):
+                return output * scale.view(1, -1)
+            return None
+
+        def _try_fp8_scaled_mm_linear(self, x: torch.Tensor):
+            if not _truthy_env("FOOOCUS_ZIMAGE_COMFY_RUNTIME_FAST_FP8", "1"):
+                return None
+            if self.quant_format not in ("float8_e4m3fn", "float8_e5m2"):
+                return None
+            if self.full_precision_mm:
+                return None
+            if self._quant_weight is None:
+                return None
+            if not x.is_cuda:
+                return None
+            if x.ndim != 2:
+                return None
+            if x.shape[1] != self.in_features:
+                return None
+
+            scaled_mm = getattr(torch, "_scaled_mm", None)
+            if scaled_mm is None:
+                _warn_once_env(
+                    "FOOOCUS_ZIMAGE_COMFY_RUNTIME_FAST_FP8",
+                    "[Z-Image POC] torch._scaled_mm is unavailable; falling back to standard FP8 linear path.",
+                )
+                return None
+
+            # cuBLASLt fp8 path requires K and N to be multiples of 16.
+            if (self.in_features % 16) != 0 or (self.out_features % 16) != 0:
+                return None
+
+            try:
+                weight = self._quant_weight.to(device=x.device)
+                if weight.ndim != 2:
+                    return None
+                if weight.shape != (self.out_features, self.in_features):
+                    return None
+
+                fp8_dtype = weight.dtype
+                if fp8_dtype not in (getattr(torch, "float8_e4m3fn", None), getattr(torch, "float8_e5m2", None)):
+                    return None
+
+                # Keep values in fp8 finite range before conversion.
+                fp8_max = torch.finfo(fp8_dtype).max
+                x_fp8 = torch.clamp(x, min=-fp8_max, max=fp8_max).to(dtype=fp8_dtype).contiguous()
+
+                # Use column-major RHS as required by _scaled_mm/cuBLASLt.
+                w_t = weight.t()
+                if w_t.stride(0) != 1:
+                    w_t = weight.contiguous().t()
+                    if w_t.stride(0) != 1:
+                        return None
+
+                out_dtype = x.dtype if x.dtype in (torch.float16, torch.bfloat16, torch.float32) else self.compute_dtype
+                scale_a = self._resolve_scalar_scale(self._input_scale, x.device)
+                if scale_a is None:
+                    return None
+
+                # _scaled_mm tensor-wise mode accepts only singleton scale_b.
+                # For non-singleton weight scales, run matmul with scale_b=1 and apply
+                # the per-channel scale on the output (same math as current fallback path).
+                scale_b = self._resolve_scalar_scale(self._weight_scale, x.device)
+                apply_weight_scale_after = scale_b is None and self._weight_scale is not None
+                if scale_b is None:
+                    scale_b = torch.ones((), device=x.device, dtype=torch.float32)
+
+                bias = self.bias.to(device=x.device, dtype=out_dtype) if self.bias is not None else None
+
+                try:
+                    output = scaled_mm(
+                        x_fp8,
+                        w_t,
+                        out_dtype=out_dtype,
+                        bias=bias,
+                        scale_a=scale_a,
+                        scale_b=scale_b,
+                    )
+                except TypeError:
+                    # Older torch builds may not accept bias argument in _scaled_mm.
+                    output = scaled_mm(
+                        x_fp8,
+                        w_t,
+                        out_dtype=out_dtype,
+                        scale_a=scale_a,
+                        scale_b=scale_b,
+                    )
+                    if bias is not None:
+                        output = output + bias
+
+                if isinstance(output, tuple):
+                    output = output[0]
+
+                if apply_weight_scale_after:
+                    output = self._apply_weight_scale(output, x.device)
+                    if output is None:
+                        return None
+                _warn_once_env(
+                    "FOOOCUS_ZIMAGE_COMFY_RUNTIME_FAST_FP8",
+                    "[Z-Image POC] Using torch._scaled_mm fast FP8 path for runtime quantized linear layers.",
+                )
+                return output
+            except Exception:
+                return None
+
         def _try_fp8_direct_linear(self, x: torch.Tensor):
             if self.quant_format not in ("float8_e4m3fn", "float8_e5m2"):
                 return None
@@ -2682,20 +2810,17 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
             if self._quant_weight is None:
                 return None
 
+            # Fast path: torch._scaled_mm for FP8 when supported.
+            output = self._try_fp8_scaled_mm_linear(x)
+            if output is not None:
+                return output
+
             try:
                 weight = self._quant_weight.to(device=x.device)
                 output = torch.nn.functional.linear(x, weight, None)
-                scale = self._weight_scale
-                if scale is not None:
-                    scale = scale.to(device=x.device, dtype=output.dtype)
-                    if scale.ndim == 0:
-                        output = output * scale
-                    elif scale.ndim == 1 and scale.shape[0] == self.out_features:
-                        output = output * scale.view(1, -1)
-                    elif scale.ndim == 2 and scale.shape == (self.out_features, 1):
-                        output = output * scale.view(1, -1)
-                    else:
-                        return None
+                output = self._apply_weight_scale(output, x.device)
+                if output is None:
+                    return None
 
                 if self.bias is not None:
                     output = output + self.bias.to(device=x.device, dtype=output.dtype)
