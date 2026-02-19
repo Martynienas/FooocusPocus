@@ -1495,18 +1495,13 @@ def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) 
             "Single-file Z-Image checkpoint does not contain transformer weights in expected format."
         )
 
-    missing, unexpected = pipeline.transformer.load_state_dict(transformer_sd, strict=False)
-    # Guardrail: if mismatch is huge, fail early rather than silently generating wrong outputs.
-    if len(unexpected) > 64:
-        raise RuntimeError(
-            f"Transformer weight mismatch too large (unexpected={len(unexpected)}). "
-            "Checkpoint may be incompatible with selected Z-Image components."
-        )
-    if len(missing) > 256:
-        raise RuntimeError(
-            f"Transformer weight mismatch too large (missing={len(missing)}). "
-            "Checkpoint may be incompatible with selected Z-Image components."
-        )
+    _load_component_override_from_file(
+        pipeline,
+        "transformer",
+        single_file_path,
+        state_dict_override=transformer_sd,
+        source_label=f"{os.path.basename(single_file_path)}::transformer",
+    )
 
     # Optional: if single-file includes text encoder / VAE weights, prefer them.
     if hasattr(pipeline, "text_encoder") and pipeline.text_encoder is not None:
@@ -1736,16 +1731,12 @@ def _build_pipeline_from_single_file_components(
         except Exception as e:
             print(f"[Z-Image POC] Z-Image transformer conversion skipped: {e}")
 
-    remapped_transformer_sd = _remap_state_dict_to_model_keys(
-        selected_transformer_sd, transformer_model_keys, "transformer"
-    )
-
-    _apply_component_state_dict(
-        transformer_component,
-        remapped_transformer_sd,
-        label="transformer",
-        missing_limit=None,
-        unexpected_limit=None,
+    _load_component_override_from_file(
+        pipeline,
+        "transformer",
+        single_file_path,
+        state_dict_override=selected_transformer_sd,
+        source_label=f"{os.path.basename(single_file_path)}::transformer",
     )
     if prefer_single_file_aux_weights:
         _apply_component_state_dict(getattr(pipeline, "text_encoder", None), parts["text_encoder"], label="text_encoder")
@@ -2440,7 +2431,13 @@ def _load_component_override(pipeline, component_name: str, component_path: str,
     print(f"[Z-Image POC] Using override {component_name}: {component_path}")
 
 
-def _load_component_override_from_file(pipeline, component_name: str, component_file: str) -> None:
+def _load_component_override_from_file(
+    pipeline,
+    component_name: str,
+    component_file: str,
+    state_dict_override: Optional[dict] = None,
+    source_label: Optional[str] = None,
+) -> None:
     import torch
 
     component = getattr(pipeline, component_name, None)
@@ -2449,18 +2446,21 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
         return
 
     file_path = os.path.abspath(component_file)
-    state_dict = None
-    if file_path.lower().endswith(".safetensors"):
-        from safetensors.torch import load_file as safetensors_load_file
-        state_dict = safetensors_load_file(file_path, device="cpu")
+    if state_dict_override is not None:
+        state_dict = dict(state_dict_override)
     else:
-        raw = torch.load(file_path, map_location="cpu")
-        if isinstance(raw, dict) and isinstance(raw.get("state_dict"), dict):
-            state_dict = raw["state_dict"]
-        elif isinstance(raw, dict):
-            state_dict = raw
+        state_dict = None
+        if file_path.lower().endswith(".safetensors"):
+            from safetensors.torch import load_file as safetensors_load_file
+            state_dict = safetensors_load_file(file_path, device="cpu")
         else:
-            raise RuntimeError(f"Unsupported override weights format: {file_path}")
+            raw = torch.load(file_path, map_location="cpu")
+            if isinstance(raw, dict) and isinstance(raw.get("state_dict"), dict):
+                state_dict = raw["state_dict"]
+            elif isinstance(raw, dict):
+                state_dict = raw
+            else:
+                raise RuntimeError(f"Unsupported override weights format: {file_path}")
 
     quant_side_suffixes = (
         ".comfy_quant",
@@ -3062,7 +3062,7 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
     )
     remapped = None
     runtime_quant_enabled = (
-        component_name == "text_encoder"
+        component_name in ("text_encoder", "transformer")
         and _truthy_env("FOOOCUS_ZIMAGE_COMFY_RUNTIME_QUANT", "1")
     )
     runtime_stats = {"layers": 0, "replaced": 0, "skipped": 0, "float8": 0, "nvfp4": 0}
@@ -3119,7 +3119,7 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
     if component_name in ("vae", "text_encoder"):
         if precheck_ratio < 0.35:
             print(
-                f"[Z-Image POC] Skipping incompatible {component_name} override file '{os.path.basename(file_path)}' "
+                f"[Z-Image POC] Skipping incompatible {component_name} override file '{source_label or os.path.basename(file_path)}' "
                 f"(precheck remap_match={precheck_ratio:.1%}); using model default {component_name}."
             )
             state_dict.clear()
@@ -3129,7 +3129,7 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
     missing, unexpected = _apply_component_state_dict(
         component,
         remapped,
-        label=f"{component_name} file override ({os.path.basename(file_path)})",
+        label=f"{component_name} file override ({source_label or os.path.basename(file_path)})",
         missing_limit=None,
         unexpected_limit=None,
     )
@@ -3143,7 +3143,7 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
     if remap_ratio < 0.65 or missing_ratio > 0.35 or unexpected_ratio > 0.35:
         if component_name in ("vae", "text_encoder"):
             print(
-                f"[Z-Image POC] Skipping incompatible {component_name} override file '{os.path.basename(file_path)}' "
+                f"[Z-Image POC] Skipping incompatible {component_name} override file '{source_label or os.path.basename(file_path)}' "
                 f"(remap_match={remap_ratio:.1%}, missing={len(missing)} ({missing_ratio:.1%}), "
                 f"unexpected={len(unexpected)} ({unexpected_ratio:.1%})); using model default {component_name}."
             )
@@ -3151,12 +3151,12 @@ def _load_component_override_from_file(pipeline, component_name: str, component_
             remapped.clear()
             return
         raise RuntimeError(
-            f"Incompatible {component_name} override file '{os.path.basename(file_path)}': "
+            f"Incompatible {component_name} override file '{source_label or os.path.basename(file_path)}': "
             f"remap_match={remap_ratio:.1%}, missing={len(missing)} ({missing_ratio:.1%}), "
             f"unexpected={len(unexpected)} ({unexpected_ratio:.1%}). "
             "Use a compatible full-precision component or the default component folder."
         )
-    print(f"[Z-Image POC] Using override {component_name} file: {file_path}")
+    print(f"[Z-Image POC] Using override {component_name} file: {source_label or file_path}")
     state_dict.clear()
     remapped.clear()
 
