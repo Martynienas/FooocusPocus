@@ -1135,13 +1135,6 @@ def resolve_zimage_component_path(
     return None
 
 
-def is_zimage_checkpoint_name(name: str) -> bool:
-    lowered = (name or "").lower()
-    if "z-image" in lowered or "zimage" in lowered or "tongyi" in lowered:
-        return True
-    return re.search(r"(?:^|[^a-z0-9])zit(?:[^a-z0-9]|$)", lowered) is not None
-
-
 def detect_zimage_flavor(name: str) -> str:
     lowered = (name or "").lower()
     if "turbo" in lowered:
@@ -1270,17 +1263,42 @@ def _is_likely_zimage_safetensors(path: str) -> bool:
         with safe_open(path, framework="pt", device="cpu") as f:
             keys = set(f.keys())
 
-            if any(k.startswith("text_encoders.qwen3_4b.") for k in keys):
+            # Many checkpoints are saved with a transformer prefix
+            # (e.g. "model.diffusion_model.") while others are bare keys.
+            transformer_prefixes = ("model.diffusion_model.", "diffusion_model.", "transformer.")
+
+            def _strip_prefix(key: str) -> str:
+                for prefix in transformer_prefixes:
+                    if key.startswith(prefix):
+                        return key[len(prefix):]
+                return key
+
+            normalized_keys = {_strip_prefix(k) for k in keys}
+
+            if any(k.startswith("text_encoders.qwen3_4b.") for k in keys) or any(
+                k.startswith("text_encoders.qwen3_4b.") for k in normalized_keys
+            ):
                 return True
 
+            cap_weight_key = None
             if "cap_embedder.1.weight" in keys:
-                cap_shape = tuple(f.get_tensor("cap_embedder.1.weight").shape)
+                cap_weight_key = "cap_embedder.1.weight"
+            else:
+                for prefix in transformer_prefixes:
+                    candidate = f"{prefix}cap_embedder.1.weight"
+                    if candidate in keys:
+                        cap_weight_key = candidate
+                        break
+            if cap_weight_key is not None:
+                cap_shape = tuple(f.get_tensor(cap_weight_key).shape)
+                # Forge-style detection: Lumina2 backbone with dim=3840 is Z-Image.
                 if len(cap_shape) >= 1 and cap_shape[0] == 3840:
                     return True
 
-            has_lumina_backbone = any(k.startswith("layers.0.attention.") for k in keys)
-            has_zimage_text = any(k.startswith("text_encoders.") and "qwen3" in k for k in keys)
-            if has_lumina_backbone and has_zimage_text:
+            has_lumina_backbone = any(k.startswith("layers.0.attention.") for k in normalized_keys)
+            has_refiner = any(k.startswith("context_refiner.0.attention.") for k in normalized_keys)
+            has_zimage_text = any(k.startswith("text_encoders.") and "qwen3" in k for k in normalized_keys)
+            if has_lumina_backbone and (has_refiner or has_zimage_text):
                 return True
     except Exception:
         return False
@@ -1331,9 +1349,6 @@ def should_use_zimage_checkpoint(name: str, checkpoint_folders: list[str]) -> bo
 
 def inspect_zimage_checkpoint_detection(name: str, checkpoint_folders: list[str]) -> tuple[bool, str]:
     raw_name = str(name or "")
-    if is_zimage_checkpoint_name(raw_name):
-        return True, "matched checkpoint name pattern"
-
     resolved = _resolve_named_path(raw_name, checkpoint_folders)
     if resolved is None:
         return False, "could not resolve model path from checkpoint folders"
@@ -1963,9 +1978,7 @@ def resolve_zimage_source(name: str, checkpoint_folders: list[str], auto_downloa
         if os.path.isdir(resolved) and is_zimage_model_directory(resolved):
             return "directory", resolved, flavor
         if os.path.isfile(resolved):
-            # Trust explicit user selection by filename pattern even when key fingerprint
-            # is inconclusive (common with repacked/quantized AIO checkpoints).
-            if _is_likely_zimage_safetensors(resolved) or is_zimage_checkpoint_name(os.path.basename(resolved)):
+            if _is_likely_zimage_safetensors(resolved):
                 return "single_file", resolved, flavor
 
     return None, None, flavor
