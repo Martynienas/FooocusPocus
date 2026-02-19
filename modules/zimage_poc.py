@@ -2562,17 +2562,25 @@ def _load_component_override_from_file(
             return torch.empty(0, dtype=self.compute_dtype)
 
         @classmethod
-        def from_linear(cls, linear_module: torch.nn.Linear):
-            compute_dtype = getattr(linear_module.weight, "dtype", torch.bfloat16)
+        def from_linear(cls, linear_module):
+            weight = getattr(linear_module, "weight", None)
+            if weight is None or not isinstance(weight, torch.Tensor) or weight.ndim != 2:
+                raise RuntimeError("Module is not linear-like (missing 2D weight tensor).")
+
+            in_features = int(getattr(linear_module, "in_features", weight.shape[1]))
+            out_features = int(getattr(linear_module, "out_features", weight.shape[0]))
+            bias = getattr(linear_module, "bias", None)
+            compute_dtype = getattr(weight, "dtype", torch.bfloat16)
+
             layer = cls(
-                in_features=linear_module.in_features,
-                out_features=linear_module.out_features,
-                bias=linear_module.bias is not None,
+                in_features=in_features,
+                out_features=out_features,
+                bias=bias is not None,
                 compute_dtype=compute_dtype,
             )
-            if linear_module.bias is not None:
-                layer.bias.data.copy_(linear_module.bias.detach())
-            layer._dense_weight = linear_module.weight.detach()
+            if bias is not None and layer.bias is not None:
+                layer.bias.data.copy_(bias.detach())
+            layer._dense_weight = weight.detach()
             return layer
 
         def _clear_cache(self):
@@ -2916,6 +2924,21 @@ def _load_component_override_from_file(
         else:
             setattr(current, leaf, new_module)
 
+    def _is_linear_like_module(module) -> bool:
+        weight = getattr(module, "weight", None)
+        if weight is None or not isinstance(weight, torch.Tensor) or weight.ndim != 2:
+            return False
+        in_features = getattr(module, "in_features", None)
+        out_features = getattr(module, "out_features", None)
+        if in_features is None or out_features is None:
+            out_features, in_features = weight.shape[0], weight.shape[1]
+        try:
+            in_features = int(in_features)
+            out_features = int(out_features)
+        except Exception:
+            return False
+        return in_features > 0 and out_features > 0
+
     def _install_comfy_runtime_quant_modules(component_module, remapped_sd: dict) -> dict:
         bases = sorted(
             {
@@ -2950,10 +2973,15 @@ def _load_component_override_from_file(
                 replaced += 1
                 replaced_bases.add(base)
                 continue
-            if not isinstance(target, torch.nn.Linear):
+            if not _is_linear_like_module(target):
                 skipped += 1
                 continue
-            _set_module(component_module, base, _ComfyRuntimeQuantLinear.from_linear(target))
+            try:
+                replacement = _ComfyRuntimeQuantLinear.from_linear(target)
+            except Exception:
+                skipped += 1
+                continue
+            _set_module(component_module, base, replacement)
             replaced += 1
             replaced_bases.add(base)
 
@@ -3102,6 +3130,65 @@ def _load_component_override_from_file(
         converted.pop("scaled_fp8", None)
         return converted, stats
 
+    def _dequantize_selected_comfy_bases(sd: dict, selected_bases: set[str]) -> tuple[dict, dict]:
+        if not selected_bases:
+            return sd, {"selected": 0, "dequantized": 0, "float8": 0, "nvfp4": 0, "skipped": 0}
+
+        converted = dict(sd)
+        stats = {
+            "selected": len(selected_bases),
+            "dequantized": 0,
+            "float8": 0,
+            "nvfp4": 0,
+            "skipped": 0,
+        }
+
+        for base in sorted(selected_bases):
+            conf = _decode_comfy_quant_entry(converted.get(f"{base}.comfy_quant"))
+            weight_key = f"{base}.weight"
+            if not isinstance(conf, dict) or weight_key not in converted:
+                stats["skipped"] += 1
+                continue
+
+            fmt = str(conf.get("format", "")).lower()
+            try:
+                if fmt in ("float8_e4m3fn", "float8_e5m2"):
+                    weight = converted[weight_key].float()
+                    scale = converted.get(f"{base}.weight_scale", None)
+                    if scale is not None:
+                        weight = weight * scale.float()
+                    converted[weight_key] = weight.to(torch.bfloat16)
+                    stats["float8"] += 1
+                    stats["dequantized"] += 1
+                elif fmt == "nvfp4":
+                    packed = converted[weight_key]
+                    block_scale = converted.get(f"{base}.weight_scale", None)
+                    tensor_scale = converted.get(f"{base}.weight_scale_2", None)
+                    if block_scale is None or tensor_scale is None:
+                        stats["skipped"] += 1
+                        continue
+                    deq = _decode_fp4_e2m1_packed_u8(packed)
+                    per_block = _from_blocked_scales(block_scale.float())
+                    expanded_scale = per_block.repeat_interleave(16, dim=1) * tensor_scale.float()
+                    if deq.shape != expanded_scale.shape:
+                        stats["skipped"] += 1
+                        continue
+                    converted[weight_key] = (deq * expanded_scale).to(torch.bfloat16)
+                    stats["nvfp4"] += 1
+                    stats["dequantized"] += 1
+                else:
+                    stats["skipped"] += 1
+                    continue
+            except Exception:
+                stats["skipped"] += 1
+                continue
+
+            # Remove quant-side tensors for layers now running eager dense weights.
+            for suffix in quant_side_suffixes:
+                converted.pop(f"{base}{suffix}", None)
+
+        return converted, stats
+
     state_dict, legacy_stats = _normalize_legacy_scaled_fp8_weights(state_dict)
     if legacy_stats.get("migrated", 0) > 0:
         print(
@@ -3142,14 +3229,18 @@ def _load_component_override_from_file(
         runtime_stats = _install_comfy_runtime_quant_modules(component, remapped_candidate)
         if runtime_stats["layers"] > 0 and runtime_stats["replaced"] > 0:
             replaced_bases = runtime_stats.get("replaced_bases", set())
-            for key in list(remapped_candidate.keys()):
-                for suffix in quant_side_suffixes:
-                    if not key.endswith(suffix):
-                        continue
-                    base = key[: -len(suffix)]
-                    if base not in replaced_bases:
-                        remapped_candidate.pop(key, None)
-                    break
+            quant_bases = {
+                key[: -len(".comfy_quant")]
+                for key in remapped_candidate.keys()
+                if key.endswith(".comfy_quant")
+            }
+            unmapped_bases = quant_bases - set(replaced_bases)
+            remapped_candidate, unmapped_stats = _dequantize_selected_comfy_bases(
+                remapped_candidate, unmapped_bases
+            )
+            runtime_stats["unmapped"] = len(unmapped_bases)
+            runtime_stats["unmapped_dequantized"] = unmapped_stats.get("dequantized", 0)
+            runtime_stats["unmapped_skipped"] = unmapped_stats.get("skipped", 0)
             remapped = remapped_candidate
             if runtime_stats["replaced"] >= runtime_stats["layers"]:
                 print(
@@ -3161,6 +3252,7 @@ def _load_component_override_from_file(
                 print(
                     f"[Z-Image POC] Runtime Comfy quant partially mapped for {component_name} "
                     f"(replaced={runtime_stats['replaced']}/{runtime_stats['layers']}, "
+                    f"unmapped_dequantized={runtime_stats.get('unmapped_dequantized', 0)}, "
                     "unmapped layers keep eager load path)."
                 )
 
