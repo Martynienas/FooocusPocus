@@ -882,8 +882,7 @@ def worker():
         async_task.adm_scaler_end = 0.0
         return current_progress
 
-    def apply_zimage_turbo_defaults(async_task):
-        flavor = modules.zimage_poc.detect_zimage_flavor(async_task.base_model_name)
+    def apply_zimage_turbo_defaults(async_task, flavor: str):
         if flavor != 'turbo':
             return
 
@@ -960,6 +959,11 @@ def worker():
         print(f'[Z-Image POC] Source: {source_kind} @ {source_path}')
         print(f"[Z-Image POC] Overrides: text_encoder={async_task.zit_text_encoder}, vae={async_task.zit_vae}")
 
+        try:
+            modules.zimage_poc.maybe_cleanup_for_model_change(source_kind, source_path)
+        except Exception as e:
+            print(f'[Z-Image POC] Warning: model-change cleanup check failed: {e}')
+
         unsupported = []
         if async_task.input_image_checkbox:
             unsupported.append('image input')
@@ -971,7 +975,7 @@ def worker():
             print(f"[Z-Image POC] Ignoring unsupported features: {', '.join(unsupported)}")
 
         unloaded_standard_models = maybe_unload_standard_models_for_zimage()
-        apply_zimage_turbo_defaults(async_task)
+        apply_zimage_turbo_defaults(async_task, flavor)
         current_progress = max(current_progress, 2)
         progressbar(async_task, current_progress, 'Running Z-Image POC generation ...')
 

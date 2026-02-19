@@ -16,6 +16,7 @@ _MAX_TRANSFORMER_MAPPING_DECISIONS = 32
 _TRANSFORMER_MAPPING_CACHE_VERSION = "v1"
 _PERSISTENT_TRANSFORMER_CACHE_VERSION = "v1"
 _ENV_WARNING_ONCE = set()
+_LAST_ZIMAGE_SOURCE_SIGNATURE = None
 _TOKENIZER_JSON_SHA256 = {
     "Tongyi-MAI/Z-Image-Turbo": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
 }
@@ -298,6 +299,43 @@ def clear_runtime_caches(flush_cuda: bool = True, aggressive: bool = True) -> di
     _PROMPT_EMBED_CACHE.clear()
     _cleanup_memory(cuda=flush_cuda, aggressive=aggressive)
     return {"pipelines": released_pipelines, "prompt_cache_entries": prompt_cache_entries}
+
+
+def _zimage_harsh_cleanup_on_model_change_enabled() -> bool:
+    return _truthy_env("FOOOCUS_ZIMAGE_HARSH_CLEANUP_ON_MODEL_CHANGE", "1")
+
+
+def maybe_cleanup_for_model_change(source_kind: Optional[str], source_path: Optional[str]) -> dict:
+    global _LAST_ZIMAGE_SOURCE_SIGNATURE
+
+    if not source_kind or not source_path:
+        return {"changed": False, "cleaned": False, "pipelines": 0, "prompt_cache_entries": 0}
+
+    signature = (str(source_kind), os.path.abspath(os.path.realpath(source_path)))
+    previous_signature = _LAST_ZIMAGE_SOURCE_SIGNATURE
+    _LAST_ZIMAGE_SOURCE_SIGNATURE = signature
+
+    changed = previous_signature is not None and previous_signature != signature
+    if not changed:
+        return {"changed": False, "cleaned": False, "pipelines": 0, "prompt_cache_entries": 0}
+
+    if not _zimage_harsh_cleanup_on_model_change_enabled():
+        return {"changed": True, "cleaned": False, "pipelines": 0, "prompt_cache_entries": 0}
+
+    stats = clear_runtime_caches(flush_cuda=True, aggressive=True)
+    prev_name = os.path.basename(previous_signature[1]) if previous_signature else "unknown"
+    next_name = os.path.basename(signature[1])
+    print(
+        "[Z-Image POC] Model source changed; applied harsh runtime cleanup "
+        f"({prev_name} -> {next_name}): "
+        f"pipelines={stats.get('pipelines', 0)}, prompt_cache_entries={stats.get('prompt_cache_entries', 0)}."
+    )
+    return {
+        "changed": True,
+        "cleaned": True,
+        "pipelines": int(stats.get("pipelines", 0)),
+        "prompt_cache_entries": int(stats.get("prompt_cache_entries", 0)),
+    }
 
 
 def _cuda_mem_info_gb() -> tuple[float, float]:
@@ -1135,17 +1173,45 @@ def resolve_zimage_component_path(
     return None
 
 
+def _forced_zimage_flavor() -> Optional[str]:
+    raw = os.environ.get("FOOOCUS_ZIMAGE_FLAVOR", "").strip().lower()
+    if raw in ("turbo", "standard"):
+        return raw
+    if raw:
+        _warn_once_env(
+            "FOOOCUS_ZIMAGE_FLAVOR",
+            f"[Z-Image POC] Ignoring invalid FOOOCUS_ZIMAGE_FLAVOR='{raw}'. Expected 'turbo' or 'standard'.",
+        )
+    return None
+
+
 def detect_zimage_flavor(name: str) -> str:
-    lowered = (name or "").lower()
-    if "turbo" in lowered:
-        return "turbo"
-    return "standard"
+    forced = _forced_zimage_flavor()
+    if forced is not None:
+        return forced
+
+    # Forge Neo behavior: ZImage checkpoints resolve to Turbo flavor.
+    return "turbo"
+
+
+def _detect_zimage_flavor_from_source(source_kind: str, source_path: str, fallback: str = "turbo") -> str:
+    forced = _forced_zimage_flavor()
+    if forced is not None:
+        return forced
+
+    # Keep function signature stable, but align runtime behavior to Forge Neo:
+    # one ZImage class -> Tongyi-MAI/Z-Image-Turbo repo.
+    _ = (source_kind, source_path, fallback)
+    return "turbo"
 
 
 def _repo_for_flavor(flavor: str) -> str:
-    if flavor == "turbo":
-        return "Tongyi-MAI/Z-Image-Turbo"
-    return "Tongyi-MAI/Z-Image"
+    if flavor != "turbo":
+        _warn_once_env(
+            "FOOOCUS_ZIMAGE_FLAVOR_NON_TURBO",
+            "[Z-Image POC] Non-turbo Z-Image flavor requested; using Turbo repo to match Forge Neo behavior.",
+        )
+    return "Tongyi-MAI/Z-Image-Turbo"
 
 
 def _sha256_file(path: str) -> str:
@@ -1976,9 +2042,11 @@ def resolve_zimage_source(name: str, checkpoint_folders: list[str], auto_downloa
 
     if resolved is not None:
         if os.path.isdir(resolved) and is_zimage_model_directory(resolved):
+            flavor = _detect_zimage_flavor_from_source("directory", resolved, fallback=flavor)
             return "directory", resolved, flavor
         if os.path.isfile(resolved):
             if _is_likely_zimage_safetensors(resolved):
+                flavor = _detect_zimage_flavor_from_source("single_file", resolved, fallback=flavor)
                 return "single_file", resolved, flavor
 
     return None, None, flavor
