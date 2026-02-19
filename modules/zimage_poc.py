@@ -461,17 +461,6 @@ def _zimage_fp16_quant_accum_mode() -> str:
     return mode
 
 
-def _zimage_quant_backend() -> str:
-    raw = os.environ.get("FOOOCUS_ZIMAGE_QUANT_BACKEND", "runtime").strip().lower()
-    if raw in ("runtime", "comfy_ops"):
-        return raw
-    _warn_once_env(
-        "FOOOCUS_ZIMAGE_QUANT_BACKEND",
-        f"[Z-Image POC] Ignoring invalid FOOOCUS_ZIMAGE_QUANT_BACKEND='{raw}'. Expected: runtime|comfy_ops.",
-    )
-    return "runtime"
-
-
 def _zimage_prewarm_enabled() -> bool:
     return _truthy_env("FOOOCUS_ZIMAGE_PREWARM", "0")
 
@@ -3258,158 +3247,6 @@ def _load_component_override_from_file(
             "skipped_type_counts": skipped_type_counts,
         }
 
-    def _import_comfy_ops_module():
-        import sys
-
-        comfy_root = os.environ.get("FOOOCUS_ZIMAGE_COMFY_ROOT", "").strip()
-        tried_root = None
-        initial_error = None
-
-        try:
-            import comfy.ops as comfy_ops  # type: ignore
-            return comfy_ops, None
-        except Exception as e:
-            initial_error = e
-
-        if comfy_root:
-            tried_root = os.path.abspath(os.path.expanduser(comfy_root))
-            if os.path.isdir(tried_root) and tried_root not in sys.path:
-                sys.path.insert(0, tried_root)
-            try:
-                import comfy.ops as comfy_ops  # type: ignore
-                print(f"[Z-Image POC] Loaded Comfy ops from FOOOCUS_ZIMAGE_COMFY_ROOT={tried_root}")
-                return comfy_ops, None
-            except Exception as e:
-                return None, f"{initial_error}; retry_with_root={tried_root}: {e}"
-
-        return None, str(initial_error)
-
-    def _install_comfy_ops_quant_modules(component_module, remapped_sd: dict, compute_dtype) -> dict:
-        bases = sorted(
-            {
-                key[: -len(".comfy_quant")]
-                for key in remapped_sd.keys()
-                if key.endswith(".comfy_quant") and f"{key[: -len('.comfy_quant')]}.weight" in remapped_sd
-            }
-        )
-        if not bases:
-            return {
-                "layers": 0,
-                "replaced": 0,
-                "skipped": 0,
-                "float8": 0,
-                "nvfp4": 0,
-                "backend": "comfy_ops",
-            }
-
-        comfy_ops, import_error = _import_comfy_ops_module()
-        if comfy_ops is None:
-            return {
-                "layers": len(bases),
-                "replaced": 0,
-                "skipped": len(bases),
-                "float8": 0,
-                "nvfp4": 0,
-                "replaced_bases": set(),
-                "skipped_unresolved": len(bases),
-                "skipped_type_counts": {"import_error": len(bases)},
-                "backend": "comfy_ops",
-                "error": f"Unable to import comfy.ops ({import_error})",
-            }
-
-        try:
-            mixed_ops = comfy_ops.mixed_precision_ops(
-                quant_config={},
-                compute_dtype=compute_dtype,
-                full_precision_mm=False,
-                disabled=[],
-            )
-            linear_cls = getattr(mixed_ops, "Linear", None)
-            if linear_cls is None:
-                raise RuntimeError("mixed_precision_ops did not expose Linear class.")
-        except Exception as e:
-            return {
-                "layers": len(bases),
-                "replaced": 0,
-                "skipped": len(bases),
-                "float8": 0,
-                "nvfp4": 0,
-                "replaced_bases": set(),
-                "skipped_unresolved": len(bases),
-                "skipped_type_counts": {"init_error": len(bases)},
-                "backend": "comfy_ops",
-                "error": f"Failed to initialize Comfy mixed_precision_ops ({e})",
-            }
-
-        replaced = 0
-        skipped = 0
-        float8_layers = 0
-        nvfp4_layers = 0
-        replaced_bases = set()
-        skipped_type_counts = {}
-        skipped_unresolved = 0
-
-        def _mark_skipped_type(name: str):
-            skipped_type_counts[name] = skipped_type_counts.get(name, 0) + 1
-
-        for base in bases:
-            conf = _decode_comfy_quant_entry(remapped_sd.get(f"{base}.comfy_quant"))
-            fmt = str(conf.get("format", "")).lower() if isinstance(conf, dict) else ""
-            if fmt in ("float8_e4m3fn", "float8_e5m2"):
-                float8_layers += 1
-            elif fmt == "nvfp4":
-                nvfp4_layers += 1
-
-            try:
-                target = _resolve_module(component_module, base)
-            except Exception:
-                skipped += 1
-                skipped_unresolved += 1
-                continue
-
-            if isinstance(target, linear_cls):
-                replaced += 1
-                replaced_bases.add(base)
-                continue
-            if not _is_linear_like_module(target):
-                skipped += 1
-                _mark_skipped_type(type(target).__name__)
-                continue
-
-            try:
-                weight = getattr(target, "weight", None)
-                bias = getattr(target, "bias", None)
-                in_features = int(getattr(target, "in_features", weight.shape[1]))
-                out_features = int(getattr(target, "out_features", weight.shape[0]))
-                target_device = getattr(weight, "device", None)
-                replacement = linear_cls(
-                    in_features=in_features,
-                    out_features=out_features,
-                    bias=bias is not None,
-                    device=target_device,
-                    dtype=compute_dtype,
-                )
-            except Exception:
-                skipped += 1
-                _mark_skipped_type(type(target).__name__)
-                continue
-
-            _set_module(component_module, base, replacement)
-            replaced += 1
-            replaced_bases.add(base)
-
-        return {
-            "layers": len(bases),
-            "replaced": replaced,
-            "skipped": skipped,
-            "float8": float8_layers,
-            "nvfp4": nvfp4_layers,
-            "replaced_bases": replaced_bases,
-            "skipped_unresolved": skipped_unresolved,
-            "skipped_type_counts": skipped_type_counts,
-            "backend": "comfy_ops",
-        }
-
     def _normalize_legacy_scaled_fp8_weights(sd: dict) -> tuple[dict, dict]:
         converted = dict(sd)
         migrated = 0
@@ -3644,7 +3481,6 @@ def _load_component_override_from_file(
         component_name in ("text_encoder", "transformer")
         and _truthy_env("FOOOCUS_ZIMAGE_COMFY_RUNTIME_QUANT", "1")
     )
-    runtime_quant_backend = _zimage_quant_backend()
     runtime_stats = {"layers": 0, "replaced": 0, "skipped": 0, "float8": 0, "nvfp4": 0}
     if runtime_quant_enabled:
         remapped_candidate = _remap_state_dict_to_model_keys(
@@ -3667,26 +3503,8 @@ def _load_component_override_from_file(
                 f"[Z-Image POC] Native FP8 synth skipped non-linear layers for {component_name}: "
                 f"skipped_non_linear={synth_stats['skipped_non_linear']}."
             )
-        if runtime_quant_backend == "comfy_ops":
-            compute_dtype = getattr(component, "dtype", None)
-            if compute_dtype not in (torch.float16, torch.bfloat16, torch.float32):
-                compute_dtype = torch.bfloat16
-            runtime_stats = _install_comfy_ops_quant_modules(component, remapped_candidate, compute_dtype)
-            if runtime_stats.get("error"):
-                print(
-                    f"[Z-Image POC] Comfy quant backend unavailable for {component_name}: "
-                    f"{runtime_stats['error']}. Falling back to runtime backend."
-                )
-                runtime_stats = _install_comfy_runtime_quant_modules(component, remapped_candidate)
-                runtime_stats["backend"] = "runtime"
-            else:
-                print(
-                    f"[Z-Image POC] Using experimental Comfy mixed_precision_ops backend for {component_name} "
-                    f"(compute_dtype={compute_dtype})."
-                )
-        else:
-            runtime_stats = _install_comfy_runtime_quant_modules(component, remapped_candidate)
-            runtime_stats["backend"] = "runtime"
+        runtime_stats = _install_comfy_runtime_quant_modules(component, remapped_candidate)
+        runtime_stats["backend"] = "runtime"
         if runtime_stats["layers"] > 0 and runtime_stats["replaced"] > 0:
             replaced_bases = runtime_stats.get("replaced_bases", set())
             quant_bases = {
@@ -3719,7 +3537,7 @@ def _load_component_override_from_file(
                     f"(replaced={runtime_stats['replaced']}/{runtime_stats['layers']}, "
                     f"unmapped_dequantized={runtime_stats.get('unmapped_dequantized', 0)}, "
                     f"skipped_unresolved={runtime_stats.get('skipped_unresolved', 0)}"
-                    f"{skipped_type_summary}, backend={runtime_stats.get('backend', 'runtime')}, "
+                    f"{skipped_type_summary}, "
                     "unmapped layers keep eager load path)."
                 )
 
