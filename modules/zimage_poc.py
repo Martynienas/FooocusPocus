@@ -3099,6 +3099,7 @@ def _load_component_override_from_file(
         def forward(self, input: torch.Tensor):
             input_shape = input.shape
             x = input.reshape(-1, input_shape[-1]) if input.ndim > 2 else input
+            input_runtime_dtype = x.dtype
             force_lowp = _truthy_env("FOOOCUS_ZIMAGE_COMFY_RUNTIME_LOWP", "1")
             if self.quant_format is not None and force_lowp:
                 compute_dtype = self.compute_dtype if self.compute_dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
@@ -3125,6 +3126,11 @@ def _load_component_override_from_file(
                 weight = self._runtime_weight(x)
                 bias = self.bias.to(device=x.device, dtype=compute_dtype) if self.bias is not None else None
                 output = torch.nn.functional.linear(x, weight, bias)
+
+            # Keep module interface dtype stable even when we upcast internal
+            # accumulation for quantized paths.
+            if self.quant_format is not None and output.dtype != input_runtime_dtype:
+                output = output.to(dtype=input_runtime_dtype)
 
             if input.ndim > 2:
                 output = output.reshape(*input_shape[:-1], self.out_features)
