@@ -3955,7 +3955,8 @@ def generate_zimage(
     except Exception:
         pass
 
-    max_sequence_length = 256 if flavor == "turbo" else 512
+    # Keep turbo aligned with Z-Image pipeline defaults instead of a stricter local cap.
+    max_sequence_length = 512
     use_cfg = guidance_scale > 1.0
     allow_quality_fallback = _zimage_allow_quality_fallback()
 
