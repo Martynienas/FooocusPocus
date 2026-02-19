@@ -479,6 +479,76 @@ def _zimage_prewarm_size(default_width: int = 832, default_height: int = 1216) -
     return width, height
 
 
+def _zimage_black_image_retry_enabled() -> bool:
+    return _truthy_env("FOOOCUS_ZIMAGE_BLACK_IMAGE_RETRY", "1")
+
+
+def _zimage_black_image_max_value() -> int:
+    raw = os.environ.get("FOOOCUS_ZIMAGE_BLACK_IMAGE_MAX_VALUE", "").strip()
+    if raw == "":
+        return 8
+    try:
+        value = int(raw)
+        if value < 0:
+            raise ValueError()
+        return min(value, 32)
+    except Exception:
+        _warn_once_env(
+            "FOOOCUS_ZIMAGE_BLACK_IMAGE_MAX_VALUE",
+            f"[Z-Image POC] Ignoring invalid FOOOCUS_ZIMAGE_BLACK_IMAGE_MAX_VALUE='{raw}'.",
+        )
+        return 8
+
+
+def _zimage_black_image_mean_threshold() -> float:
+    raw = os.environ.get("FOOOCUS_ZIMAGE_BLACK_IMAGE_MEAN_THRESHOLD", "").strip()
+    if raw == "":
+        return 2.0
+    try:
+        value = float(raw)
+        if value < 0.0:
+            raise ValueError()
+        return min(value, 10.0)
+    except Exception:
+        _warn_once_env(
+            "FOOOCUS_ZIMAGE_BLACK_IMAGE_MEAN_THRESHOLD",
+            f"[Z-Image POC] Ignoring invalid FOOOCUS_ZIMAGE_BLACK_IMAGE_MEAN_THRESHOLD='{raw}'.",
+        )
+        return 2.0
+
+
+def _analyze_black_image(image) -> Optional[dict]:
+    try:
+        from PIL import ImageStat
+    except Exception:
+        return None
+
+    try:
+        rgb = image.convert("RGB")
+        extrema = rgb.getextrema()
+        stats = ImageStat.Stat(rgb)
+        max_value = max(ch_max for _, ch_max in extrema)
+        mean_value = float(sum(stats.mean) / max(len(stats.mean), 1))
+        std_value = float(sum(stats.stddev) / max(len(stats.stddev), 1))
+        return {
+            "max": float(max_value),
+            "mean": mean_value,
+            "std": std_value,
+        }
+    except Exception:
+        return None
+
+
+def _is_suspected_black_image(image) -> tuple[bool, Optional[dict]]:
+    info = _analyze_black_image(image)
+    if info is None:
+        return False, None
+    max_cap = float(_zimage_black_image_max_value())
+    mean_cap = float(_zimage_black_image_mean_threshold())
+    is_black = info["max"] <= max_cap and info["mean"] <= mean_cap
+    return is_black, info
+
+
 def _warn_once_env(key: str, message: str) -> None:
     token = f"{key}:{message}"
     if token in _ENV_WARNING_ONCE:
@@ -3916,6 +3986,7 @@ def generate_zimage(
 
     output = None
     call_start = time.perf_counter()
+    black_retry_used = False
     try:
         retry_caps = []
         retry_sizes = []
@@ -3939,6 +4010,78 @@ def generate_zimage(
             generation_attempts = attempt + 1
             try:
                 output = _run_pipeline_call(pipeline, call_kwargs)
+                if _zimage_black_image_retry_enabled() and not black_retry_used:
+                    try:
+                        candidate = output.images[0]
+                    except Exception:
+                        candidate = None
+                    if candidate is not None:
+                        is_black, black_info = _is_suspected_black_image(candidate)
+                        if is_black:
+                            black_retry_used = True
+                            strategy = str(getattr(pipeline, "_zimage_xformers_strategy", "unknown"))
+                            transformer_dtype = str(getattr(getattr(pipeline, "transformer", None), "dtype", "n/a"))
+                            print(
+                                f"[Z-Image POC] Suspected black output detected "
+                                f"(mean={black_info['mean']:.2f}, max={black_info['max']:.0f}, std={black_info['std']:.2f}, "
+                                f"attn={strategy}, dtype={transformer_dtype}). Retrying once with safer runtime."
+                            )
+
+                            changed = []
+                            transformer = getattr(pipeline, "transformer", None)
+                            if transformer is not None and hasattr(transformer, "set_attention_backend"):
+                                # Flash can occasionally produce pathological outputs on some builds.
+                                if "flash" in strategy:
+                                    for candidate_backend in ("xformers", "native"):
+                                        try:
+                                            transformer.set_attention_backend(candidate_backend)
+                                            pipeline._zimage_xformers_strategy = f"dispatch_backend:{candidate_backend}"
+                                            changed.append(f"attn={candidate_backend}")
+                                            break
+                                        except Exception:
+                                            continue
+
+                            # If user forced fp16 and model behaves badly, attempt one safer dtype retry.
+                            import torch
+                            transformer_dtype_obj = getattr(transformer, "dtype", None)
+                            if transformer_dtype_obj == torch.float16 and torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+                                for module_name in ("transformer", "text_encoder", "vae"):
+                                    module = getattr(pipeline, module_name, None)
+                                    if module is not None and hasattr(module, "to"):
+                                        try:
+                                            module.to(dtype=torch.bfloat16)
+                                        except Exception:
+                                            pass
+                                new_dtype = getattr(getattr(pipeline, "transformer", None), "dtype", torch.bfloat16)
+                                call_kwargs["prompt_embeds"] = [
+                                    x.to(device=generator_device, dtype=new_dtype) for x in call_kwargs.get("prompt_embeds", [])
+                                ]
+                                call_kwargs["negative_prompt_embeds"] = [
+                                    x.to(device=generator_device, dtype=new_dtype) for x in call_kwargs.get("negative_prompt_embeds", [])
+                                ]
+                                changed.append("dtype=bf16")
+
+                            if changed:
+                                if generator_device == "cuda":
+                                    _cleanup_memory(cuda=True, aggressive=True)
+                                call_kwargs["generator"] = torch.Generator(device=generator_device).manual_seed(seed)
+                                output = _run_pipeline_call(pipeline, call_kwargs)
+                                try:
+                                    retry_image = output.images[0]
+                                    retry_black, retry_info = _is_suspected_black_image(retry_image)
+                                    if retry_black:
+                                        print(
+                                            f"[Z-Image POC] Black-image retry remained near-black "
+                                            f"(mean={retry_info['mean']:.2f}, max={retry_info['max']:.0f})."
+                                        )
+                                    else:
+                                        print(
+                                            f"[Z-Image POC] Black-image retry recovered output using {', '.join(changed)}."
+                                        )
+                                except Exception:
+                                    pass
+                            else:
+                                print("[Z-Image POC] No safe retry knobs available; keeping original output.")
                 break
             except RuntimeError as e:
                 msg = str(e).lower()
