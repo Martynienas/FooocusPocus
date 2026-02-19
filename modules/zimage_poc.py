@@ -2050,18 +2050,27 @@ def _preflight_generation_memory_mode(
             reason = f"forced by env FOOOCUS_ZIMAGE_FORCE_MEMORY_MODE={forced_mode}"
         elif allow_relax:
             reason = f"preflight relax est={estimated_need_gb:.2f}GB gap={gap_gb:.2f}GB"
-        generator_device, used_offload = _apply_memory_mode(
-            pipeline=pipeline,
-            device=device,
-            target_mode=target_mode,
-            total_vram_gb=total_vram_gb,
-            free_vram_gb=free_vram_gb,
-            pressure=pressure,
-            profile=profile,
-            reason=reason,
-            allow_relax=allow_relax,
-        )
-        _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
+        try:
+            generator_device, used_offload = _apply_memory_mode(
+                pipeline=pipeline,
+                device=device,
+                target_mode=target_mode,
+                total_vram_gb=total_vram_gb,
+                free_vram_gb=free_vram_gb,
+                pressure=pressure,
+                profile=profile,
+                reason=reason,
+                allow_relax=allow_relax,
+            )
+            _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
+        except Exception as e:
+            print(
+                f"[Z-Image POC] Warning: failed to switch memory mode to '{target_mode}' during preflight: {e}. "
+                "Continuing with current mode."
+            )
+            if current_mode in ("sequential_offload", "model_offload", "full_gpu"):
+                pipeline._zimage_memory_mode = current_mode
+            _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
 
     forced_suffix = f", forced={forced_mode}" if forced_mode is not None else ""
     print(
@@ -2527,15 +2536,17 @@ def _load_component_override_from_file(
             if bias:
                 self.bias = torch.nn.Parameter(torch.empty(out_features, dtype=compute_dtype), requires_grad=False)
             else:
-                self.register_parameter("bias", None)
+                self.bias = None
 
-            self.register_buffer("_dense_weight", None, persistent=False)
-            self.register_buffer("_quant_weight", None, persistent=False)
-            self.register_buffer("_weight_scale", None, persistent=False)
-            self.register_buffer("_weight_scale_2", None, persistent=False)
-            self.register_buffer("_input_scale", None, persistent=False)
+            # Keep optional tensors as plain attrs to avoid None-valued module
+            # params/buffers confusing offload hooks.
+            self._dense_weight = None
+            self._quant_weight = None
+            self._weight_scale = None
+            self._weight_scale_2 = None
+            self._input_scale = None
 
-            self.register_buffer("_cached_weight", None, persistent=False)
+            self._cached_weight = None
             self._cached_weight_device: Optional[str] = None
             self._cached_weight_dtype: Optional[str] = None
 
@@ -2909,6 +2920,7 @@ def _load_component_override_from_file(
         skipped = 0
         float8_layers = 0
         nvfp4_layers = 0
+        replaced_bases = set()
         for base in bases:
             conf = _decode_comfy_quant_entry(remapped_sd.get(f"{base}.comfy_quant"))
             fmt = str(conf.get("format", "")).lower() if isinstance(conf, dict) else ""
@@ -2925,12 +2937,14 @@ def _load_component_override_from_file(
 
             if isinstance(target, _ComfyRuntimeQuantLinear):
                 replaced += 1
+                replaced_bases.add(base)
                 continue
             if not isinstance(target, torch.nn.Linear):
                 skipped += 1
                 continue
             _set_module(component_module, base, _ComfyRuntimeQuantLinear.from_linear(target))
             replaced += 1
+            replaced_bases.add(base)
 
         return {
             "layers": len(bases),
@@ -2938,6 +2952,7 @@ def _load_component_override_from_file(
             "skipped": skipped,
             "float8": float8_layers,
             "nvfp4": nvfp4_layers,
+            "replaced_bases": replaced_bases,
         }
 
     def _normalize_legacy_scaled_fp8_weights(sd: dict) -> tuple[dict, dict]:
@@ -3114,19 +3129,29 @@ def _load_component_override_from_file(
                 f"fp8_e5m2={synth_stats['float8_e5m2']}."
             )
         runtime_stats = _install_comfy_runtime_quant_modules(component, remapped_candidate)
-        if runtime_stats["layers"] > 0 and runtime_stats["replaced"] >= runtime_stats["layers"]:
+        if runtime_stats["layers"] > 0 and runtime_stats["replaced"] > 0:
+            replaced_bases = runtime_stats.get("replaced_bases", set())
+            for key in list(remapped_candidate.keys()):
+                for suffix in quant_side_suffixes:
+                    if not key.endswith(suffix):
+                        continue
+                    base = key[: -len(suffix)]
+                    if base not in replaced_bases:
+                        remapped_candidate.pop(key, None)
+                    break
             remapped = remapped_candidate
-            print(
-                f"[Z-Image POC] Runtime Comfy quant enabled for {component_name}: "
-                f"layers={runtime_stats['layers']}, fp8={runtime_stats['float8']}, "
-                f"nvfp4={runtime_stats['nvfp4']}."
-            )
-        elif runtime_stats["layers"] > 0:
-            print(
-                f"[Z-Image POC] Runtime Comfy quant partially mapped for {component_name} "
-                f"(replaced={runtime_stats['replaced']}/{runtime_stats['layers']}); "
-                "falling back to eager dequantization."
-            )
+            if runtime_stats["replaced"] >= runtime_stats["layers"]:
+                print(
+                    f"[Z-Image POC] Runtime Comfy quant enabled for {component_name}: "
+                    f"layers={runtime_stats['layers']}, fp8={runtime_stats['float8']}, "
+                    f"nvfp4={runtime_stats['nvfp4']}."
+                )
+            else:
+                print(
+                    f"[Z-Image POC] Runtime Comfy quant partially mapped for {component_name} "
+                    f"(replaced={runtime_stats['replaced']}/{runtime_stats['layers']}, "
+                    "unmapped layers keep eager load path)."
+                )
 
     if remapped is None:
         state_dict, quant_stats = _dequantize_comfy_mixed_weights(state_dict)
@@ -3506,19 +3531,25 @@ def generate_zimage(
     if generator_device == "cuda":
         _maybe_preemptive_cuda_cleanup_before_generation(pipeline, profile=profile)
 
-    generator_device, used_offload = _preflight_generation_memory_mode(
-        pipeline=pipeline,
-        cache_key=cache_key,
-        device="cuda" if generator_device == "cuda" else "cpu",
-        generator_device=generator_device,
-        used_offload=used_offload,
-        profile=profile,
-        width=width,
-        height=height,
-        max_sequence_length=max_sequence_length,
-        use_cfg=use_cfg,
-        flavor=flavor,
-    )
+    try:
+        generator_device, used_offload = _preflight_generation_memory_mode(
+            pipeline=pipeline,
+            cache_key=cache_key,
+            device="cuda" if generator_device == "cuda" else "cpu",
+            generator_device=generator_device,
+            used_offload=used_offload,
+            profile=profile,
+            width=width,
+            height=height,
+            max_sequence_length=max_sequence_length,
+            use_cfg=use_cfg,
+            flavor=flavor,
+        )
+    except Exception:
+        # Ensure preflight failures don't leave a poisoned cached pipeline for the next image.
+        _PIPELINE_CACHE.pop(cache_key, None)
+        _clear_prompt_cache_for_pipeline(cache_key)
+        raise
     generator = torch.Generator(device=generator_device).manual_seed(seed)
     stage_times["runtime_prep"] = time.perf_counter() - stage_start
 
