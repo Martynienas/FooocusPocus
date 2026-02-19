@@ -398,6 +398,7 @@ def prepare_environment():
         "FOOOCUS_ZIMAGE_RESERVE_VRAM_GB": "2.2",
         "FOOOCUS_ZIMAGE_PERF_PROFILE": "speed",
         "FOOOCUS_ZIMAGE_ALLOW_QUALITY_FALLBACK": "0",
+        "FOOOCUS_ZIMAGE_COMPUTE_DTYPE": "auto",
     }
     applied_defaults = []
     for key, value in zimage_default_env.items():

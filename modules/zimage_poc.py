@@ -407,6 +407,78 @@ def _zimage_perf_profile() -> str:
     return profile
 
 
+def _zimage_compute_dtype_mode() -> str:
+    raw = os.environ.get("FOOOCUS_ZIMAGE_COMPUTE_DTYPE", "").strip().lower()
+    if raw == "":
+        raw = os.environ.get("FOOOCUS_ZIMAGE_DTYPE", "auto").strip().lower()
+
+    aliases = {
+        "auto": "auto",
+        "bf16": "bf16",
+        "bfloat16": "bf16",
+        "fp16": "fp16",
+        "float16": "fp16",
+        "half": "fp16",
+        "fp32": "fp32",
+        "float32": "fp32",
+        "full": "fp32",
+    }
+    mode = aliases.get(raw, None)
+    if mode is None:
+        _warn_once_env(
+            "FOOOCUS_ZIMAGE_COMPUTE_DTYPE",
+            f"[Z-Image POC] Ignoring invalid compute dtype '{raw}'. Expected: auto|bf16|fp16|fp32.",
+        )
+        return "auto"
+    return mode
+
+
+def _zimage_prewarm_enabled() -> bool:
+    return _truthy_env("FOOOCUS_ZIMAGE_PREWARM", "0")
+
+
+def _zimage_prewarm_steps() -> int:
+    raw = os.environ.get("FOOOCUS_ZIMAGE_PREWARM_STEPS", "").strip()
+    if raw == "":
+        return 1
+    try:
+        return max(1, min(int(raw), 8))
+    except Exception:
+        _warn_once_env(
+            "FOOOCUS_ZIMAGE_PREWARM_STEPS",
+            f"[Z-Image POC] Ignoring invalid FOOOCUS_ZIMAGE_PREWARM_STEPS='{raw}'.",
+        )
+        return 1
+
+
+def _zimage_prewarm_size(default_width: int = 832, default_height: int = 1216) -> tuple[int, int]:
+    raw_w = os.environ.get("FOOOCUS_ZIMAGE_PREWARM_WIDTH", "").strip()
+    raw_h = os.environ.get("FOOOCUS_ZIMAGE_PREWARM_HEIGHT", "").strip()
+    width = default_width
+    height = default_height
+    if raw_w:
+        try:
+            width = max(256, int(raw_w))
+        except Exception:
+            _warn_once_env(
+                "FOOOCUS_ZIMAGE_PREWARM_WIDTH",
+                f"[Z-Image POC] Ignoring invalid FOOOCUS_ZIMAGE_PREWARM_WIDTH='{raw_w}'.",
+            )
+    if raw_h:
+        try:
+            height = max(256, int(raw_h))
+        except Exception:
+            _warn_once_env(
+                "FOOOCUS_ZIMAGE_PREWARM_HEIGHT",
+                f"[Z-Image POC] Ignoring invalid FOOOCUS_ZIMAGE_PREWARM_HEIGHT='{raw_h}'.",
+            )
+    width = int(width // 64) * 64
+    height = int(height // 64) * 64
+    width = max(width, 256)
+    height = max(height, 256)
+    return width, height
+
+
 def _warn_once_env(key: str, message: str) -> None:
     token = f"{key}:{message}"
     if token in _ENV_WARNING_ONCE:
@@ -1775,7 +1847,7 @@ def resolve_zimage_source(name: str, checkpoint_folders: list[str], auto_downloa
 def _pick_device_and_dtype(zimage_allow_fp16: Optional[bool] = None):
     import torch
 
-    dtype_override = os.environ.get("FOOOCUS_ZIMAGE_DTYPE", "auto").strip().lower()
+    dtype_override = _zimage_compute_dtype_mode()
     allow_unsafe_fp16 = _truthy_env("FOOOCUS_ZIMAGE_ALLOW_FP16_UNSAFE", "0")
 
     def _resolve_dtype(value: str):
@@ -3405,6 +3477,7 @@ def _load_pipeline(
             device, _ = _pick_device_and_dtype()
             generator_device, used_offload = _prepare_pipeline_memory_mode(pipeline, device)
             _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
+        _maybe_prewarm_pipeline(pipeline, generator_device=generator_device, flavor=flavor)
         # Keep cached memory mode for throughput; mode hardening is handled at load/OOM time.
         return _PIPELINE_CACHE[cache_key]
 
@@ -3538,6 +3611,7 @@ def _load_pipeline(
 
     pipeline.set_progress_bar_config(disable=True)
     generator_device, used_offload = _prepare_pipeline_memory_mode(pipeline, device)
+    _maybe_prewarm_pipeline(pipeline, generator_device=generator_device, flavor=flavor)
     _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
     return _PIPELINE_CACHE[cache_key]
 
@@ -3562,6 +3636,89 @@ def _run_pipeline_call(pipeline, call_kwargs: dict):
                     break
             if not dropped:
                 raise
+
+
+def _maybe_prewarm_pipeline(pipeline, generator_device: str, flavor: str) -> None:
+    if not _zimage_prewarm_enabled():
+        return
+    if bool(getattr(pipeline, "_zimage_prewarm_done", False)):
+        return
+
+    # Mark as attempted to avoid repeated startup penalties if warmup fails.
+    pipeline._zimage_prewarm_done = True
+    pipeline._zimage_prewarm_error = None
+
+    import torch
+
+    try:
+        steps = _zimage_prewarm_steps()
+        width, height = _zimage_prewarm_size()
+        max_sequence_length = 64 if flavor == "turbo" else 128
+        prompt = os.environ.get("FOOOCUS_ZIMAGE_PREWARM_PROMPT", "").strip() or "portrait photo"
+        negative_prompt = os.environ.get("FOOOCUS_ZIMAGE_PREWARM_NEGATIVE_PROMPT", "").strip()
+        guidance = 1.0
+        use_cfg = guidance > 1.0
+
+        if generator_device == "cuda":
+            profile = _zimage_perf_profile()
+            _maybe_preemptive_cuda_cleanup_before_generation(pipeline, profile=profile)
+
+        started = time.perf_counter()
+        print(
+            f"[Z-Image POC] Prewarm start: steps={steps}, size={width}x{height}, "
+            f"max_seq={max_sequence_length}, device={generator_device}."
+        )
+
+        with torch.inference_mode():
+            pos, neg = pipeline.encode_prompt(
+                prompt=prompt,
+                negative_prompt=negative_prompt if use_cfg else None,
+                do_classifier_free_guidance=use_cfg,
+                device=generator_device,
+                max_sequence_length=max_sequence_length,
+            )
+            prompt_embeds = [x.to(device=generator_device, dtype=pipeline.transformer.dtype) for x in pos]
+            negative_prompt_embeds = (
+                [x.to(device=generator_device, dtype=pipeline.transformer.dtype) for x in neg] if neg else []
+            )
+            generator = torch.Generator(device=generator_device).manual_seed(1)
+            output = _run_pipeline_call(
+                pipeline,
+                dict(
+                    prompt=None,
+                    width=width,
+                    height=height,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance,
+                    generator=generator,
+                    num_images_per_prompt=1,
+                    cfg_normalization=False,
+                    cfg_truncation=1.0,
+                    max_sequence_length=max_sequence_length,
+                    prompt_embeds=prompt_embeds,
+                    negative_prompt_embeds=negative_prompt_embeds,
+                ),
+            )
+            # Force lazy decode/materialization.
+            _ = output.images[0]
+            del output
+            del prompt_embeds
+            del negative_prompt_embeds
+            del generator
+
+        elapsed = time.perf_counter() - started
+        print(f"[Z-Image POC] Prewarm complete in {elapsed:.2f}s.")
+    except Exception as e:
+        pipeline._zimage_prewarm_error = str(e)
+        print(f"[Z-Image POC] Prewarm failed (ignored): {e}")
+    finally:
+        try:
+            if hasattr(pipeline, "maybe_free_model_hooks"):
+                pipeline.maybe_free_model_hooks()
+        except Exception:
+            pass
+        if generator_device == "cuda":
+            _cleanup_memory(cuda=True, aggressive=False)
 
 
 def generate_zimage(
