@@ -40,6 +40,16 @@ def _pipeline_cache_key(
     return f"{source_kind}:{os.path.abspath(source_path)}:te={te}:vae={vae}"
 
 
+def _override_cache_token(value: Optional[str]) -> str:
+    if not value:
+        return "-"
+    return os.path.abspath(os.path.realpath(value))
+
+
+def _zimage_yolo_model_swap_enabled() -> bool:
+    return _truthy_env("FOOOCUS_ZIMAGE_YOLO_MODEL_SWAP", "1")
+
+
 def _single_file_identity(path: str) -> str:
     abspath = os.path.abspath(path)
     try:
@@ -260,6 +270,22 @@ def _put_prompt_cache(key: tuple, value: tuple) -> None:
         _PROMPT_EMBED_CACHE.pop(first, None)
 
 
+def _drop_cache_entry(cache_key: str) -> None:
+    _PIPELINE_CACHE.pop(cache_key, None)
+    _clear_prompt_cache_for_pipeline(cache_key)
+
+
+def _drop_cache_aliases_for_pipeline(target_pipeline) -> None:
+    stale_keys = []
+    for key, cached in list(_PIPELINE_CACHE.items()):
+        if not isinstance(cached, tuple) or len(cached) < 1:
+            continue
+        if cached[0] is target_pipeline:
+            stale_keys.append(key)
+    for key in stale_keys:
+        _drop_cache_entry(key)
+
+
 def _cleanup_memory(cuda: bool = True, aggressive: bool = True) -> None:
     if aggressive:
         gc.collect()
@@ -364,6 +390,15 @@ def maybe_cleanup_for_model_change(source_kind: Optional[str], source_path: Opti
     changed = previous_signature is not None and previous_signature != signature
     if not changed:
         return {"changed": False, "cleaned": False, "pipelines": 0, "prompt_cache_entries": 0}
+
+    if source_kind == "single_file" and _zimage_yolo_model_swap_enabled():
+        prev_name = os.path.basename(previous_signature[1]) if previous_signature else "unknown"
+        next_name = os.path.basename(signature[1])
+        print(
+            "[Z-Image POC] Model source changed; deferring harsh cleanup "
+            f"({prev_name} -> {next_name}) because YOLO model swap is enabled."
+        )
+        return {"changed": True, "cleaned": False, "pipelines": 0, "prompt_cache_entries": 0}
 
     if not _zimage_harsh_cleanup_on_model_change_enabled():
         return {"changed": True, "cleaned": False, "pipelines": 0, "prompt_cache_entries": 0}
@@ -3749,6 +3784,8 @@ def _load_pipeline(
     text_encoder_override: Optional[str] = None,
     vae_override: Optional[str] = None,
 ):
+    text_override_token = _override_cache_token(text_encoder_override)
+    vae_override_token = _override_cache_token(vae_override)
     cache_key = _pipeline_cache_key(
         source_kind,
         source_path,
@@ -3759,8 +3796,7 @@ def _load_pipeline(
         pipeline, generator_device, used_offload = _PIPELINE_CACHE[cache_key]
         if _pipeline_has_meta_tensors(pipeline):
             print("[Z-Image POC] Cached pipeline has meta tensors, rebuilding pipeline.")
-            _PIPELINE_CACHE.pop(cache_key, None)
-            _clear_prompt_cache_for_pipeline(cache_key)
+            _drop_cache_entry(cache_key)
             return _load_pipeline(
                 source_kind,
                 source_path,
@@ -3791,6 +3827,62 @@ def _load_pipeline(
 
     zimage_allow_fp16 = _detect_zimage_allow_fp16(source_kind, source_path)
     device, dtype = _pick_device_and_dtype(zimage_allow_fp16=zimage_allow_fp16)
+
+    if source_kind == "single_file" and _zimage_yolo_model_swap_enabled():
+        reusable = None
+        for candidate_key, cached in list(_PIPELINE_CACHE.items()):
+            if not isinstance(cached, tuple) or len(cached) < 1:
+                continue
+            candidate_pipeline = cached[0]
+            if candidate_pipeline is None or _pipeline_has_meta_tensors(candidate_pipeline):
+                continue
+            if getattr(candidate_pipeline, "_zimage_cache_source_kind", None) != "single_file":
+                continue
+            if getattr(candidate_pipeline, "_zimage_cache_text_override_token", "-") != text_override_token:
+                continue
+            if getattr(candidate_pipeline, "_zimage_cache_vae_override_token", "-") != vae_override_token:
+                continue
+            if getattr(candidate_pipeline, "_zimage_cache_flavor", flavor) != flavor:
+                continue
+            candidate_source = str(getattr(candidate_pipeline, "_zimage_cache_source_path", ""))
+            if candidate_source and os.path.abspath(candidate_source) == os.path.abspath(source_path):
+                continue
+            reusable = (candidate_key, candidate_pipeline)
+            break
+
+        if reusable is not None:
+            _, reusable_pipeline = reusable
+            from_name = os.path.basename(str(getattr(reusable_pipeline, "_zimage_cache_source_path", "unknown")))
+            to_name = os.path.basename(source_path)
+            print(
+                f"[Z-Image POC] YOLO model swap: reusing existing pipeline "
+                f"({from_name} -> {to_name}) and replacing transformer weights."
+            )
+            try:
+                _load_transformer_weights_from_single_file(source_path, reusable_pipeline)
+                if _pipeline_has_meta_tensors(reusable_pipeline):
+                    raise RuntimeError("YOLO swapped pipeline contains meta tensors")
+                if text_encoder_override is not None:
+                    _load_component_override(reusable_pipeline, "text_encoder", text_encoder_override, dtype)
+                if vae_override is not None:
+                    _load_component_override(reusable_pipeline, "vae", vae_override, dtype)
+                generator_device, used_offload = _prepare_pipeline_memory_mode(reusable_pipeline, device)
+                _maybe_prewarm_pipeline(reusable_pipeline, generator_device=generator_device, flavor=flavor)
+                _drop_cache_aliases_for_pipeline(reusable_pipeline)
+                reusable_pipeline._zimage_cache_source_kind = source_kind
+                reusable_pipeline._zimage_cache_source_path = os.path.abspath(source_path)
+                reusable_pipeline._zimage_cache_flavor = flavor
+                reusable_pipeline._zimage_cache_text_override_token = text_override_token
+                reusable_pipeline._zimage_cache_vae_override_token = vae_override_token
+                _PIPELINE_CACHE[cache_key] = (reusable_pipeline, generator_device, used_offload)
+                return _PIPELINE_CACHE[cache_key]
+            except Exception as e:
+                print(f"[Z-Image POC] YOLO model swap failed, falling back to full rebuild: {e}")
+                try:
+                    _drop_cache_aliases_for_pipeline(reusable_pipeline)
+                except Exception:
+                    pass
+                _cleanup_memory(cuda=True, aggressive=True)
 
     if source_kind == "directory":
         pipeline = _call_with_dtype_compat(
@@ -3910,6 +4002,11 @@ def _load_pipeline(
     pipeline.set_progress_bar_config(disable=True)
     generator_device, used_offload = _prepare_pipeline_memory_mode(pipeline, device)
     _maybe_prewarm_pipeline(pipeline, generator_device=generator_device, flavor=flavor)
+    pipeline._zimage_cache_source_kind = source_kind
+    pipeline._zimage_cache_source_path = os.path.abspath(source_path)
+    pipeline._zimage_cache_flavor = flavor
+    pipeline._zimage_cache_text_override_token = text_override_token
+    pipeline._zimage_cache_vae_override_token = vae_override_token
     _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
     return _PIPELINE_CACHE[cache_key]
 
