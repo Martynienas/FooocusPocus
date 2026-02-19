@@ -912,6 +912,16 @@ def worker():
     def _truthy_env(name: str, default: str = '0') -> bool:
         return os.environ.get(name, default).strip().lower() in ('1', 'true', 'yes', 'on')
 
+    def _int_env(name: str, default: int, min_value: int = 1, max_value: int = 64) -> int:
+        raw = os.environ.get(name, str(default)).strip()
+        try:
+            value = int(raw)
+        except Exception:
+            return default
+        value = max(min_value, value)
+        value = min(max_value, value)
+        return value
+
     def maybe_unload_standard_models_for_zimage():
         if not _truthy_env('FOOOCUS_ZIMAGE_UNLOAD_STANDARD_MODELS', '0'):
             return False
@@ -966,8 +976,10 @@ def worker():
         progressbar(async_task, current_progress, 'Running Z-Image POC generation ...')
 
         release_cache_after_run = _truthy_env('FOOOCUS_ZIMAGE_RELEASE_CACHE_AFTER_RUN', '0')
+        batch_size = _int_env('FOOOCUS_ZIMAGE_BATCH_SIZE', 1, min_value=1, max_value=8)
 
         try:
+            tasks = []
             for i in range(async_task.image_number):
                 if async_task.last_stop is not False:
                     break
@@ -987,48 +999,159 @@ def worker():
                     task_rng,
                 )
 
-                progressbar(async_task, current_progress, f'Generating Z-Image {i + 1}/{async_task.image_number} ...')
-                try:
-                    pil_image = modules.zimage_poc.generate_zimage(
-                        source_kind=source_kind,
-                        source_path=source_path,
-                        flavor=flavor,
-                        checkpoint_folders=modules.config.paths_checkpoints,
+                tasks.append(
+                    dict(
+                        index=i,
+                        task_seed=task_seed,
                         prompt=task_prompt,
                         negative_prompt=task_negative_prompt,
-                        width=width,
-                        height=height,
-                        steps=async_task.steps,
-                        guidance_scale=float(async_task.cfg_scale),
-                        seed=task_seed,
-                        shift=float(async_task.adaptive_cfg),
-                        text_encoder_override=async_task.zit_text_encoder,
-                        vae_override=async_task.zit_vae,
                     )
-                    np_image = np.array(pil_image)
+                )
+
+            task_pos = 0
+            while task_pos < len(tasks):
+                if async_task.last_stop is not False:
+                    break
+
+                batch = [tasks[task_pos]]
+                if batch_size > 1:
+                    anchor_prompt = batch[0]['prompt']
+                    anchor_negative_prompt = batch[0]['negative_prompt']
+                    scan = task_pos + 1
+                    while scan < len(tasks) and len(batch) < batch_size:
+                        cand = tasks[scan]
+                        if cand['prompt'] != anchor_prompt or cand['negative_prompt'] != anchor_negative_prompt:
+                            break
+                        batch.append(cand)
+                        scan += 1
+
+                def _save_task_result(task_item, np_image):
+                    task = dict(
+                        task_seed=task_item['task_seed'],
+                        log_positive_prompt=task_item['prompt'],
+                        log_negative_prompt=task_item['negative_prompt'],
+                        expansion='',
+                        styles=[],
+                        positive=[task_item['prompt']],
+                        negative=[task_item['negative_prompt']],
+                    )
+                    progress = int((task_item['index'] + 1) * 100 / float(max(async_task.image_number, 1)))
+                    img_paths = save_and_log(async_task, height, [np_image], task, False, width, [], persist_image=True)
+                    yield_result(
+                        async_task,
+                        img_paths,
+                        progress,
+                        async_task.black_out_nsfw,
+                        False,
+                        do_not_show_finished_images=async_task.disable_intermediate_results,
+                    )
+
+                try:
+                    if len(batch) > 1:
+                        range_start = batch[0]['index'] + 1
+                        range_end = batch[-1]['index'] + 1
+                        progressbar(
+                            async_task,
+                            current_progress,
+                            f'Generating Z-Image {range_start}-{range_end}/{async_task.image_number} (batched) ...',
+                        )
+                        pil_images = modules.zimage_poc.generate_zimage(
+                            source_kind=source_kind,
+                            source_path=source_path,
+                            flavor=flavor,
+                            checkpoint_folders=modules.config.paths_checkpoints,
+                            prompt=batch[0]['prompt'],
+                            negative_prompt=batch[0]['negative_prompt'],
+                            width=width,
+                            height=height,
+                            steps=async_task.steps,
+                            guidance_scale=float(async_task.cfg_scale),
+                            seed=batch[0]['task_seed'],
+                            seeds=[item['task_seed'] for item in batch],
+                            shift=float(async_task.adaptive_cfg),
+                            text_encoder_override=async_task.zit_text_encoder,
+                            vae_override=async_task.zit_vae,
+                            return_images=True,
+                        )
+                        if not isinstance(pil_images, list) or len(pil_images) != len(batch):
+                            raise RuntimeError(
+                                f'Batched Z-Image returned {len(pil_images) if isinstance(pil_images, list) else "invalid"} '
+                                f'images for expected batch size {len(batch)}.'
+                            )
+                        for task_item, pil_image in zip(batch, pil_images):
+                            _save_task_result(task_item, np.array(pil_image))
+                    else:
+                        task_item = batch[0]
+                        idx = task_item['index']
+                        progressbar(
+                            async_task,
+                            current_progress,
+                            f'Generating Z-Image {idx + 1}/{async_task.image_number} ...',
+                        )
+                        pil_image = modules.zimage_poc.generate_zimage(
+                            source_kind=source_kind,
+                            source_path=source_path,
+                            flavor=flavor,
+                            checkpoint_folders=modules.config.paths_checkpoints,
+                            prompt=task_item['prompt'],
+                            negative_prompt=task_item['negative_prompt'],
+                            width=width,
+                            height=height,
+                            steps=async_task.steps,
+                            guidance_scale=float(async_task.cfg_scale),
+                            seed=task_item['task_seed'],
+                            shift=float(async_task.adaptive_cfg),
+                            text_encoder_override=async_task.zit_text_encoder,
+                            vae_override=async_task.zit_vae,
+                        )
+                        _save_task_result(task_item, np.array(pil_image))
                 except ModuleNotFoundError as e:
                     progressbar(async_task, 100, f'Z-Image POC requires missing dependency: {e}')
                     print('[Z-Image POC] Install required dependencies with:')
                     print('  python -m pip install -r requirements_versions.txt')
                     return
                 except Exception as e:
-                    progressbar(async_task, 100, f'Z-Image generation failed: {e}')
-                    print(f'[Z-Image POC] Generation failed: {e}')
-                    return
+                    if len(batch) > 1:
+                        print(
+                            f"[Z-Image POC] Batched generation failed ({e}); retrying batch as single-image runs."
+                        )
+                        for task_item in batch:
+                            if async_task.last_stop is not False:
+                                break
+                            try:
+                                idx = task_item['index']
+                                progressbar(
+                                    async_task,
+                                    current_progress,
+                                    f'Generating Z-Image {idx + 1}/{async_task.image_number} ...',
+                                )
+                                pil_image = modules.zimage_poc.generate_zimage(
+                                    source_kind=source_kind,
+                                    source_path=source_path,
+                                    flavor=flavor,
+                                    checkpoint_folders=modules.config.paths_checkpoints,
+                                    prompt=task_item['prompt'],
+                                    negative_prompt=task_item['negative_prompt'],
+                                    width=width,
+                                    height=height,
+                                    steps=async_task.steps,
+                                    guidance_scale=float(async_task.cfg_scale),
+                                    seed=task_item['task_seed'],
+                                    shift=float(async_task.adaptive_cfg),
+                                    text_encoder_override=async_task.zit_text_encoder,
+                                    vae_override=async_task.zit_vae,
+                                )
+                                _save_task_result(task_item, np.array(pil_image))
+                            except Exception as single_error:
+                                progressbar(async_task, 100, f'Z-Image generation failed: {single_error}')
+                                print(f'[Z-Image POC] Generation failed: {single_error}')
+                                return
+                    else:
+                        progressbar(async_task, 100, f'Z-Image generation failed: {e}')
+                        print(f'[Z-Image POC] Generation failed: {e}')
+                        return
 
-                task = dict(
-                    task_seed=task_seed,
-                    log_positive_prompt=task_prompt,
-                    log_negative_prompt=task_negative_prompt,
-                    expansion='',
-                    styles=[],
-                    positive=[task_prompt],
-                    negative=[task_negative_prompt],
-                )
-                progress = int((i + 1) * 100 / float(max(async_task.image_number, 1)))
-                img_paths = save_and_log(async_task, height, [np_image], task, False, width, [], persist_image=True)
-                yield_result(async_task, img_paths, progress, async_task.black_out_nsfw, False,
-                             do_not_show_finished_images=async_task.disable_intermediate_results)
+                task_pos += len(batch)
         finally:
             if unloaded_standard_models:
                 try:
