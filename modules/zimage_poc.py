@@ -2985,6 +2985,39 @@ def _load_component_override_from_file(
         converted.pop("scaled_fp8", None)
         return converted, {"migrated": migrated, "created_quant_entries": created_quant_entries}
 
+    def _synthesize_native_fp8_quant_entries(sd: dict) -> tuple[dict, dict]:
+        converted = dict(sd)
+        created = 0
+        fmt_counts = {"float8_e4m3fn": 0, "float8_e5m2": 0}
+        fp8_e4m3 = getattr(torch, "float8_e4m3fn", None)
+        fp8_e5m2 = getattr(torch, "float8_e5m2", None)
+        payload_cache = {}
+
+        for key, value in list(converted.items()):
+            if not key.endswith(".weight"):
+                continue
+            base = key[: -len(".weight")]
+            if f"{base}.comfy_quant" in converted:
+                continue
+            dtype = getattr(value, "dtype", None)
+            fmt = None
+            if fp8_e4m3 is not None and dtype == fp8_e4m3:
+                fmt = "float8_e4m3fn"
+            elif fp8_e5m2 is not None and dtype == fp8_e5m2:
+                fmt = "float8_e5m2"
+            if fmt is None:
+                continue
+
+            payload = payload_cache.get(fmt)
+            if payload is None:
+                payload = torch.tensor(list(json.dumps({"format": fmt}).encode("utf-8")), dtype=torch.uint8)
+                payload_cache[fmt] = payload
+            converted[f"{base}.comfy_quant"] = payload
+            created += 1
+            fmt_counts[fmt] += 1
+
+        return converted, {"created": created, **fmt_counts}
+
     def _dequantize_comfy_mixed_weights(sd: dict) -> tuple[dict, dict]:
         quant_entries = {}
         for key in list(sd.keys()):
@@ -3073,6 +3106,13 @@ def _load_component_override_from_file(
             f"{component_name}-file-override-runtime",
             verbose=True,
         )
+        remapped_candidate, synth_stats = _synthesize_native_fp8_quant_entries(remapped_candidate)
+        if synth_stats["created"] > 0:
+            print(
+                f"[Z-Image POC] Synthesized native FP8 quant entries for {component_name}: "
+                f"layers={synth_stats['created']}, fp8_e4m3={synth_stats['float8_e4m3fn']}, "
+                f"fp8_e5m2={synth_stats['float8_e5m2']}."
+            )
         runtime_stats = _install_comfy_runtime_quant_modules(component, remapped_candidate)
         if runtime_stats["layers"] > 0 and runtime_stats["replaced"] >= runtime_stats["layers"]:
             remapped = remapped_candidate
