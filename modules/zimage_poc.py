@@ -437,6 +437,30 @@ def _zimage_strict_fp16_mode() -> bool:
     return _zimage_compute_dtype_mode() == "fp16"
 
 
+def _zimage_fp16_quant_accum_mode() -> str:
+    raw = os.environ.get("FOOOCUS_ZIMAGE_COMFY_RUNTIME_FP16_ACCUM", "auto").strip().lower()
+    aliases = {
+        "auto": "auto",
+        "fp16": "fp16",
+        "float16": "fp16",
+        "half": "fp16",
+        "bf16": "bf16",
+        "bfloat16": "bf16",
+        "fp32": "fp32",
+        "float32": "fp32",
+        "full": "fp32",
+    }
+    mode = aliases.get(raw, None)
+    if mode is None:
+        _warn_once_env(
+            "FOOOCUS_ZIMAGE_COMFY_RUNTIME_FP16_ACCUM",
+            f"[Z-Image POC] Ignoring invalid FOOOCUS_ZIMAGE_COMFY_RUNTIME_FP16_ACCUM='{raw}'. "
+            "Expected: auto|fp16|bf16|fp32.",
+        )
+        return "auto"
+    return mode
+
+
 def _zimage_prewarm_enabled() -> bool:
     return _truthy_env("FOOOCUS_ZIMAGE_PREWARM", "0")
 
@@ -3039,6 +3063,22 @@ def _load_component_override_from_file(
                 dtype = self.compute_dtype if self.compute_dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
             else:
                 dtype = x.dtype if x.dtype in (torch.float16, torch.bfloat16, torch.float32) else self.compute_dtype
+
+            # FP16 + FP8 runtime-quant can become numerically unstable on some stacks.
+            # Allow stable accumulation dtype while keeping outer runtime in FP16 mode.
+            if self.quant_format is not None and dtype == torch.float16:
+                mode = _zimage_fp16_quant_accum_mode()
+                if mode == "bf16":
+                    if x.is_cuda and torch.cuda.is_bf16_supported():
+                        dtype = torch.bfloat16
+                elif mode == "fp32":
+                    dtype = torch.float32
+                elif mode == "auto":
+                    if x.is_cuda and torch.cuda.is_bf16_supported():
+                        dtype = torch.bfloat16
+                    else:
+                        dtype = torch.float32
+
             device_key = str(x.device)
             dtype_key = str(dtype)
             if self._cache_enabled():
@@ -3064,6 +3104,20 @@ def _load_component_override_from_file(
                 compute_dtype = self.compute_dtype if self.compute_dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
             else:
                 compute_dtype = x.dtype if x.dtype in (torch.float16, torch.bfloat16, torch.float32) else self.compute_dtype
+
+            if self.quant_format is not None and compute_dtype == torch.float16:
+                mode = _zimage_fp16_quant_accum_mode()
+                if mode == "bf16":
+                    if x.is_cuda and torch.cuda.is_bf16_supported():
+                        compute_dtype = torch.bfloat16
+                elif mode == "fp32":
+                    compute_dtype = torch.float32
+                elif mode == "auto":
+                    if x.is_cuda and torch.cuda.is_bf16_supported():
+                        compute_dtype = torch.bfloat16
+                    else:
+                        compute_dtype = torch.float32
+
             x = x.to(dtype=compute_dtype)
 
             output = self._try_fp8_direct_linear(x)
