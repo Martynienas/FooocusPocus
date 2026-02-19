@@ -3050,10 +3050,12 @@ def _load_component_override_from_file(
         converted.pop("scaled_fp8", None)
         return converted, {"migrated": migrated, "created_quant_entries": created_quant_entries}
 
-    def _synthesize_native_fp8_quant_entries(sd: dict) -> tuple[dict, dict]:
+    def _synthesize_native_fp8_quant_entries(sd: dict, component_module=None) -> tuple[dict, dict]:
         converted = dict(sd)
         created = 0
         fmt_counts = {"float8_e4m3fn": 0, "float8_e5m2": 0}
+        skipped_non_linear = 0
+        skipped_unresolved = 0
         fp8_e4m3 = getattr(torch, "float8_e4m3fn", None)
         fp8_e5m2 = getattr(torch, "float8_e5m2", None)
         payload_cache = {}
@@ -3073,6 +3075,16 @@ def _load_component_override_from_file(
             if fmt is None:
                 continue
 
+            if component_module is not None:
+                try:
+                    target = _resolve_module(component_module, base)
+                except Exception:
+                    skipped_unresolved += 1
+                    continue
+                if not _is_linear_like_module(target):
+                    skipped_non_linear += 1
+                    continue
+
             payload = payload_cache.get(fmt)
             if payload is None:
                 payload = torch.tensor(list(json.dumps({"format": fmt}).encode("utf-8")), dtype=torch.uint8)
@@ -3081,7 +3093,12 @@ def _load_component_override_from_file(
             created += 1
             fmt_counts[fmt] += 1
 
-        return converted, {"created": created, **fmt_counts}
+        return converted, {
+            "created": created,
+            "skipped_non_linear": skipped_non_linear,
+            "skipped_unresolved": skipped_unresolved,
+            **fmt_counts,
+        }
 
     def _dequantize_comfy_mixed_weights(sd: dict) -> tuple[dict, dict]:
         quant_entries = {}
@@ -3230,12 +3247,19 @@ def _load_component_override_from_file(
             f"{component_name}-file-override-runtime",
             verbose=True,
         )
-        remapped_candidate, synth_stats = _synthesize_native_fp8_quant_entries(remapped_candidate)
+        remapped_candidate, synth_stats = _synthesize_native_fp8_quant_entries(
+            remapped_candidate, component_module=component
+        )
         if synth_stats["created"] > 0:
             print(
                 f"[Z-Image POC] Synthesized native FP8 quant entries for {component_name}: "
                 f"layers={synth_stats['created']}, fp8_e4m3={synth_stats['float8_e4m3fn']}, "
                 f"fp8_e5m2={synth_stats['float8_e5m2']}."
+            )
+        elif synth_stats.get("skipped_non_linear", 0) > 0:
+            print(
+                f"[Z-Image POC] Native FP8 synth skipped non-linear layers for {component_name}: "
+                f"skipped_non_linear={synth_stats['skipped_non_linear']}."
             )
         runtime_stats = _install_comfy_runtime_quant_modules(component, remapped_candidate)
         if runtime_stats["layers"] > 0 and runtime_stats["replaced"] > 0:
