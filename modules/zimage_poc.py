@@ -2955,6 +2955,12 @@ def _load_component_override_from_file(
         float8_layers = 0
         nvfp4_layers = 0
         replaced_bases = set()
+        skipped_type_counts = {}
+        skipped_unresolved = 0
+
+        def _mark_skipped_type(name: str):
+            skipped_type_counts[name] = skipped_type_counts.get(name, 0) + 1
+
         for base in bases:
             conf = _decode_comfy_quant_entry(remapped_sd.get(f"{base}.comfy_quant"))
             fmt = str(conf.get("format", "")).lower() if isinstance(conf, dict) else ""
@@ -2967,6 +2973,7 @@ def _load_component_override_from_file(
                 target = _resolve_module(component_module, base)
             except Exception:
                 skipped += 1
+                skipped_unresolved += 1
                 continue
 
             if isinstance(target, _ComfyRuntimeQuantLinear):
@@ -2975,11 +2982,13 @@ def _load_component_override_from_file(
                 continue
             if not _is_linear_like_module(target):
                 skipped += 1
+                _mark_skipped_type(type(target).__name__)
                 continue
             try:
                 replacement = _ComfyRuntimeQuantLinear.from_linear(target)
             except Exception:
                 skipped += 1
+                _mark_skipped_type(type(target).__name__)
                 continue
             _set_module(component_module, base, replacement)
             replaced += 1
@@ -2992,6 +3001,8 @@ def _load_component_override_from_file(
             "float8": float8_layers,
             "nvfp4": nvfp4_layers,
             "replaced_bases": replaced_bases,
+            "skipped_unresolved": skipped_unresolved,
+            "skipped_type_counts": skipped_type_counts,
         }
 
     def _normalize_legacy_scaled_fp8_weights(sd: dict) -> tuple[dict, dict]:
@@ -3249,10 +3260,17 @@ def _load_component_override_from_file(
                     f"nvfp4={runtime_stats['nvfp4']}."
                 )
             else:
+                skipped_types = runtime_stats.get("skipped_type_counts", {})
+                skipped_type_summary = ""
+                if skipped_types:
+                    top = sorted(skipped_types.items(), key=lambda kv: kv[1], reverse=True)[:3]
+                    skipped_type_summary = ", skipped_types=" + ",".join(f"{k}:{v}" for k, v in top)
                 print(
                     f"[Z-Image POC] Runtime Comfy quant partially mapped for {component_name} "
                     f"(replaced={runtime_stats['replaced']}/{runtime_stats['layers']}, "
                     f"unmapped_dequantized={runtime_stats.get('unmapped_dequantized', 0)}, "
+                    f"skipped_unresolved={runtime_stats.get('skipped_unresolved', 0)}"
+                    f"{skipped_type_summary}, "
                     "unmapped layers keep eager load path)."
                 )
 
