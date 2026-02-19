@@ -3047,6 +3047,10 @@ def _load_component_override_from_file(
             try:
                 weight = self._quant_weight.to(device=x.device)
                 output = torch.nn.functional.linear(x, weight, None)
+                # Some torch builds can return FP8 here when either operand is FP8.
+                # Keep runtime activations in a compute-friendly float dtype.
+                if output.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+                    output = output.to(dtype=x.dtype if x.dtype in (torch.float16, torch.bfloat16, torch.float32) else torch.bfloat16)
                 output = self._apply_weight_scale(output, x.device)
                 if output is None:
                     return None
@@ -3127,10 +3131,13 @@ def _load_component_override_from_file(
                 bias = self.bias.to(device=x.device, dtype=compute_dtype) if self.bias is not None else None
                 output = torch.nn.functional.linear(x, weight, bias)
 
-            # Keep module interface dtype stable even when we upcast internal
-            # accumulation for quantized paths.
-            if self.quant_format is not None and output.dtype != input_runtime_dtype:
-                output = output.to(dtype=input_runtime_dtype)
+            # Keep module interface dtype stable, but never propagate FP8 activations.
+            if self.quant_format is not None:
+                target_dtype = input_runtime_dtype
+                if target_dtype not in (torch.float16, torch.bfloat16, torch.float32):
+                    target_dtype = compute_dtype if compute_dtype in (torch.float16, torch.bfloat16, torch.float32) else torch.bfloat16
+                if output.dtype != target_dtype:
+                    output = output.to(dtype=target_dtype)
 
             if input.ndim > 2:
                 output = output.reshape(*input_shape[:-1], self.out_features)
