@@ -7,6 +7,7 @@ import re
 import time
 import ctypes
 import ctypes.util
+import inspect
 from typing import Optional
 
 
@@ -408,6 +409,162 @@ def _cuda_mem_info_gb() -> tuple[float, float]:
 
 def _truthy_env(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _zimage_alt_path_enabled() -> bool:
+    return _truthy_env("FOOOCUS_ZIMAGE_ALT_PATH", "1")
+
+
+def zimage_active_backend_name() -> str:
+    return "alternate" if _zimage_alt_path_enabled() else "legacy"
+
+
+def _pipeline_accepts_kwarg(fn, kwarg_name: str, include_var_kwargs: bool = True) -> bool:
+    if fn is None:
+        return False
+    try:
+        signature = inspect.signature(fn)
+    except Exception:
+        return False
+    if kwarg_name in signature.parameters:
+        return True
+    if include_var_kwargs:
+        return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values())
+    return False
+
+
+def _pipeline_supports_latents(pipeline) -> bool:
+    return _pipeline_accepts_kwarg(
+        getattr(pipeline, "__call__", None),
+        "latents",
+        include_var_kwargs=False,
+    )
+
+
+def _resolve_latent_channels(pipeline) -> int:
+    candidates = []
+    transformer = getattr(pipeline, "transformer", None)
+    if transformer is not None:
+        tcfg = getattr(transformer, "config", None)
+        if tcfg is not None:
+            candidates.append(getattr(tcfg, "in_channels", None))
+            if isinstance(tcfg, dict):
+                candidates.append(tcfg.get("in_channels"))
+
+    unet = getattr(pipeline, "unet", None)
+    if unet is not None:
+        ucfg = getattr(unet, "config", None)
+        if ucfg is not None:
+            candidates.append(getattr(ucfg, "in_channels", None))
+            if isinstance(ucfg, dict):
+                candidates.append(ucfg.get("in_channels"))
+
+    for value in candidates:
+        try:
+            channels = int(value)
+            if channels > 0:
+                return channels
+        except Exception:
+            continue
+    return 4
+
+
+def _resolve_latent_spatial_size(pipeline, width: int, height: int) -> tuple[int, int]:
+    scale = getattr(pipeline, "vae_scale_factor", 8)
+    try:
+        scale = int(scale)
+    except Exception:
+        raise RuntimeError(f"Invalid vae_scale_factor={scale!r} for alternate Z-Image path.")
+    if scale <= 0:
+        raise RuntimeError(f"Invalid vae_scale_factor={scale!r} for alternate Z-Image path.")
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f"Invalid generation size {width}x{height} for alternate Z-Image path.")
+    if (width % scale) != 0 or (height % scale) != 0:
+        raise RuntimeError(
+            f"Alternate Z-Image path requires size divisible by vae_scale_factor={scale}, got {width}x{height}."
+        )
+    latent_w = width // scale
+    latent_h = height // scale
+    if latent_w <= 0 or latent_h <= 0:
+        raise RuntimeError(
+            f"Resolved invalid latent size {latent_w}x{latent_h} from image size {width}x{height}."
+        )
+    return latent_h, latent_w
+
+
+def _ensure_alt_path_prerequisites(pipeline, width: int, height: int) -> None:
+    if not _pipeline_supports_latents(pipeline):
+        raise RuntimeError(
+            "Z-Image alternate path requires pipeline latents support (missing __call__(..., latents=...))."
+        )
+    _ = _resolve_latent_channels(pipeline)
+    _ = _resolve_latent_spatial_size(pipeline, width=width, height=height)
+
+
+def _build_latents_from_seeds(
+    pipeline,
+    seed_list: list[int],
+    width: int,
+    height: int,
+    generator_device: str,
+):
+    import torch
+
+    if not seed_list:
+        raise RuntimeError("Alternate Z-Image path requires at least one seed.")
+
+    latent_h, latent_w = _resolve_latent_spatial_size(pipeline, width=width, height=height)
+    channels = _resolve_latent_channels(pipeline)
+    transformer = getattr(pipeline, "transformer", None)
+    target_dtype = getattr(transformer, "dtype", torch.float32)
+    if not isinstance(target_dtype, torch.dtype):
+        target_dtype = torch.float32
+    if target_dtype in (torch.float16, torch.bfloat16):
+        sample_dtype = target_dtype
+    else:
+        sample_dtype = torch.float32
+
+    latents = []
+    for value in seed_list:
+        generator = torch.Generator(device="cpu").manual_seed(int(value))
+        latent = torch.randn(
+            (1, channels, latent_h, latent_w),
+            generator=generator,
+            device="cpu",
+            dtype=sample_dtype,
+        )
+        latents.append(latent)
+    return torch.cat(latents, dim=0).to(device=generator_device, dtype=sample_dtype)
+
+
+def _set_generation_random_source(
+    *,
+    call_kwargs: dict,
+    seed_list: list[int],
+    pipeline,
+    generator_device: str,
+    use_alt_path: bool,
+):
+    import torch
+
+    if use_alt_path:
+        call_kwargs.pop("generator", None)
+        call_kwargs["latents"] = _build_latents_from_seeds(
+            pipeline=pipeline,
+            seed_list=seed_list,
+            width=int(call_kwargs.get("width", 0)),
+            height=int(call_kwargs.get("height", 0)),
+            generator_device=generator_device,
+        )
+        return None
+
+    call_kwargs.pop("latents", None)
+    if len(seed_list) <= 1:
+        generator = torch.Generator(device=generator_device).manual_seed(seed_list[0])
+    else:
+        generator = [torch.Generator(device=generator_device).manual_seed(s) for s in seed_list]
+    call_kwargs["generator"] = generator
+    return generator
 
 
 def _iter_safetensors_files(root: str):
@@ -1920,7 +2077,7 @@ def _load_transformer_weights_from_single_file(single_file_path: str, pipeline) 
             try:
                 pipeline.text_encoder.load_state_dict(text_sd, strict=False)
                 print(f"[Z-Image POC] Loaded text_encoder weights from single-file ({len(text_sd)} tensors).")
-            except Exception as e:
+            except RuntimeError as e:
                 print(f"[Z-Image POC] Skipped text_encoder weights from single-file: {e}")
 
     if hasattr(pipeline, "vae") and pipeline.vae is not None:
@@ -4601,7 +4758,7 @@ def _maybe_prewarm_pipeline(
             _cleanup_memory(cuda=True, aggressive=False)
 
 
-def generate_zimage(
+def _generate_zimage_impl(
     source_kind: str,
     source_path: str,
     flavor: str,
@@ -4618,6 +4775,7 @@ def generate_zimage(
     text_encoder_override: Optional[str] = None,
     vae_override: Optional[str] = None,
     return_images: bool = False,
+    _use_alt_path: bool = False,
 ):
     import torch
 
@@ -4776,10 +4934,18 @@ def generate_zimage(
         if parsed:
             seed_list = parsed
 
-    if len(seed_list) <= 1:
-        generator = torch.Generator(device=generator_device).manual_seed(seed_list[0])
+    generator = None
+    if _use_alt_path:
+        _ensure_alt_path_prerequisites(
+            pipeline=pipeline,
+            width=width,
+            height=height,
+        )
     else:
-        generator = [torch.Generator(device=generator_device).manual_seed(s) for s in seed_list]
+        if len(seed_list) <= 1:
+            generator = torch.Generator(device=generator_device).manual_seed(seed_list[0])
+        else:
+            generator = [torch.Generator(device=generator_device).manual_seed(s) for s in seed_list]
     stage_times["runtime_prep"] = time.perf_counter() - stage_start
 
     neg_key = negative_prompt if use_cfg else ""
@@ -4831,7 +4997,6 @@ def generate_zimage(
         height=height,
         num_inference_steps=steps,
         guidance_scale=guidance_scale,
-        generator=generator,
         num_images_per_prompt=max(1, len(seed_list)),
         cfg_normalization=False,
         cfg_truncation=1.0,
@@ -4839,6 +5004,16 @@ def generate_zimage(
         prompt_embeds=prompt_embeds,
         negative_prompt_embeds=negative_prompt_embeds,
     )
+    if _use_alt_path:
+        _set_generation_random_source(
+            call_kwargs=call_kwargs,
+            seed_list=seed_list,
+            pipeline=pipeline,
+            generator_device=generator_device,
+            use_alt_path=True,
+        )
+    else:
+        call_kwargs["generator"] = generator
     print(
         f"[Z-Image POC] Runtime params: steps={steps}, guidance={guidance_scale}, shift={shift}, "
         f"size={call_kwargs['width']}x{call_kwargs['height']}, max_seq={max_sequence_length}, offload={used_offload}, "
@@ -4870,6 +5045,14 @@ def generate_zimage(
         for attempt in range(max_attempts):
             generation_attempts = attempt + 1
             try:
+                if _use_alt_path:
+                    _set_generation_random_source(
+                        call_kwargs=call_kwargs,
+                        seed_list=seed_list,
+                        pipeline=pipeline,
+                        generator_device=generator_device,
+                        use_alt_path=True,
+                    )
                 _prepare_granular_pipeline_call(
                     pipeline,
                     generator_device=generator_device,
@@ -4954,12 +5137,13 @@ def generate_zimage(
                             if changed:
                                 if generator_device == "cuda":
                                     _cleanup_memory(cuda=True, aggressive=True)
-                                if len(seed_list) <= 1:
-                                    call_kwargs["generator"] = torch.Generator(device=generator_device).manual_seed(seed_list[0])
-                                else:
-                                    call_kwargs["generator"] = [
-                                        torch.Generator(device=generator_device).manual_seed(s) for s in seed_list
-                                    ]
+                                _set_generation_random_source(
+                                    call_kwargs=call_kwargs,
+                                    seed_list=seed_list,
+                                    pipeline=pipeline,
+                                    generator_device=generator_device,
+                                    use_alt_path=_use_alt_path,
+                                )
                                 original_output = output
                                 try:
                                     _prepare_granular_pipeline_call(
@@ -5002,15 +5186,14 @@ def generate_zimage(
                                 "keeping batch output."
                             )
                 break
-            except RuntimeError as e:
+            except Exception as e:
                 msg = str(e).lower()
                 deep_generator_mismatch = (
                     "cannot generate a cpu tensor from a generator of type cuda" in msg
                     or ("generator of type cuda" in msg and "cpu tensor" in msg)
                 )
-                if deep_generator_mismatch and generator_device == "cuda":
-                    deep_state = getattr(pipeline, "_zimage_deep_patcher_state", None)
-                    if isinstance(deep_state, dict) and attempt < (max_attempts - 1):
+                if (not _use_alt_path) and deep_generator_mismatch and generator_device == "cuda":
+                    if attempt < (max_attempts - 1):
                         print(
                             "[Z-Image POC] Deep patcher runtime generator/device mismatch detected; "
                             "disabling deep patcher for this pipeline and retrying with non-deep offload."
@@ -5037,12 +5220,13 @@ def generate_zimage(
                                 "[Z-Image POC] Failed to switch from deep patcher after generator mismatch: "
                                 f"{fallback_error}"
                             )
-                        if len(seed_list) <= 1:
-                            call_kwargs["generator"] = torch.Generator(device=generator_device).manual_seed(seed_list[0])
-                        else:
-                            call_kwargs["generator"] = [
-                                torch.Generator(device=generator_device).manual_seed(s) for s in seed_list
-                            ]
+                        _set_generation_random_source(
+                            call_kwargs=call_kwargs,
+                            seed_list=seed_list,
+                            pipeline=pipeline,
+                            generator_device=generator_device,
+                            use_alt_path=False,
+                        )
                         call_kwargs["prompt_embeds"] = [
                             x.to(device=generator_device, dtype=pipeline.transformer.dtype)
                             for x in call_kwargs.get("prompt_embeds", [])
@@ -5193,3 +5377,138 @@ def generate_zimage(
                 f"cleanup={_format_timing_ms(stage_times.get('cleanup'))}, "
                 f"total={_format_timing_ms(total_elapsed)}"
             )
+
+
+def _generate_zimage_legacy(
+    source_kind: str,
+    source_path: str,
+    flavor: str,
+    checkpoint_folders: list[str],
+    prompt: str,
+    negative_prompt: str,
+    width: int,
+    height: int,
+    steps: int,
+    guidance_scale: float,
+    seed: int,
+    seeds: Optional[list[int]] = None,
+    shift: float = 3.0,
+    text_encoder_override: Optional[str] = None,
+    vae_override: Optional[str] = None,
+    return_images: bool = False,
+):
+    return _generate_zimage_impl(
+        source_kind=source_kind,
+        source_path=source_path,
+        flavor=flavor,
+        checkpoint_folders=checkpoint_folders,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        width=width,
+        height=height,
+        steps=steps,
+        guidance_scale=guidance_scale,
+        seed=seed,
+        seeds=seeds,
+        shift=shift,
+        text_encoder_override=text_encoder_override,
+        vae_override=vae_override,
+        return_images=return_images,
+        _use_alt_path=False,
+    )
+
+
+def _generate_zimage_alt(
+    source_kind: str,
+    source_path: str,
+    flavor: str,
+    checkpoint_folders: list[str],
+    prompt: str,
+    negative_prompt: str,
+    width: int,
+    height: int,
+    steps: int,
+    guidance_scale: float,
+    seed: int,
+    seeds: Optional[list[int]] = None,
+    shift: float = 3.0,
+    text_encoder_override: Optional[str] = None,
+    vae_override: Optional[str] = None,
+    return_images: bool = False,
+):
+    return _generate_zimage_impl(
+        source_kind=source_kind,
+        source_path=source_path,
+        flavor=flavor,
+        checkpoint_folders=checkpoint_folders,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        width=width,
+        height=height,
+        steps=steps,
+        guidance_scale=guidance_scale,
+        seed=seed,
+        seeds=seeds,
+        shift=shift,
+        text_encoder_override=text_encoder_override,
+        vae_override=vae_override,
+        return_images=return_images,
+        _use_alt_path=True,
+    )
+
+
+def generate_zimage(
+    source_kind: str,
+    source_path: str,
+    flavor: str,
+    checkpoint_folders: list[str],
+    prompt: str,
+    negative_prompt: str,
+    width: int,
+    height: int,
+    steps: int,
+    guidance_scale: float,
+    seed: int,
+    seeds: Optional[list[int]] = None,
+    shift: float = 3.0,
+    text_encoder_override: Optional[str] = None,
+    vae_override: Optional[str] = None,
+    return_images: bool = False,
+):
+    if _zimage_alt_path_enabled():
+        return _generate_zimage_alt(
+            source_kind=source_kind,
+            source_path=source_path,
+            flavor=flavor,
+            checkpoint_folders=checkpoint_folders,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=width,
+            height=height,
+            steps=steps,
+            guidance_scale=guidance_scale,
+            seed=seed,
+            seeds=seeds,
+            shift=shift,
+            text_encoder_override=text_encoder_override,
+            vae_override=vae_override,
+            return_images=return_images,
+        )
+    return _generate_zimage_legacy(
+        source_kind=source_kind,
+        source_path=source_path,
+        flavor=flavor,
+        checkpoint_folders=checkpoint_folders,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        width=width,
+        height=height,
+        steps=steps,
+        guidance_scale=guidance_scale,
+        seed=seed,
+        seeds=seeds,
+        shift=shift,
+        text_encoder_override=text_encoder_override,
+        vae_override=vae_override,
+        return_images=return_images,
+    )

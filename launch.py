@@ -393,6 +393,7 @@ def prepare_environment():
 
     zimage_default_env = {
         # Tuned defaults for stable, fast Z-Image runs on ~12GB VRAM cards.
+        "FOOOCUS_ZIMAGE_ALT_PATH": "1",
         "FOOOCUS_ZIMAGE_ATTN_BACKEND": "auto",
         "FOOOCUS_ZIMAGE_UNLOAD_STANDARD_MODELS": "1",
         "FOOOCUS_ZIMAGE_RESERVE_VRAM_GB": "2.2",

@@ -958,6 +958,7 @@ def worker():
 
         print(f'[Z-Image POC] Source: {source_kind} @ {source_path}')
         print(f"[Z-Image POC] Overrides: text_encoder={async_task.zit_text_encoder}, vae={async_task.zit_vae}")
+        print(f"[Z-Image POC] Active backend: {modules.zimage_poc.zimage_active_backend_name()}")
 
         try:
             modules.zimage_poc.maybe_cleanup_for_model_change(source_kind, source_path)
