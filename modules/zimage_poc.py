@@ -23,6 +23,7 @@ _TOKENIZER_JSON_SHA256 = {
     "Tongyi-MAI/Z-Image-Turbo": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
 }
 ZIMAGE_COMPONENT_AUTO = "Auto (use model default)"
+_ZIMAGE_GRANULAR_COMPONENT_NAMES = ("text_encoder", "text_encoder_2", "transformer", "vae")
 
 
 def _project_root() -> str:
@@ -727,6 +728,10 @@ def _zimage_forced_memory_mode() -> Optional[str]:
         return None
 
     return forced
+
+
+def _zimage_granular_offload_enabled() -> bool:
+    return _truthy_env("FOOOCUS_ZIMAGE_GRANULAR_OFFLOAD", "1")
 
 
 def _zimage_stage_timers_enabled() -> bool:
@@ -2295,6 +2300,204 @@ def _stricter_memory_mode(lhs: str, rhs: str) -> str:
     return lhs if _memory_mode_rank(lhs) >= _memory_mode_rank(rhs) else rhs
 
 
+def _module_memory_gb(module) -> float:
+    if module is None:
+        return 0.0
+    total = 0
+    try:
+        for tensor in module.parameters():
+            total += tensor.nelement() * tensor.element_size()
+    except Exception:
+        pass
+    try:
+        for tensor in module.buffers():
+            total += tensor.nelement() * tensor.element_size()
+    except Exception:
+        pass
+    return float(total) / float(1024**3)
+
+
+def _collect_granular_offload_components(pipeline) -> list[str]:
+    names = []
+    for name in _ZIMAGE_GRANULAR_COMPONENT_NAMES:
+        module = getattr(pipeline, name, None)
+        if module is None:
+            continue
+        if not hasattr(module, "to"):
+            continue
+        names.append(name)
+    return names
+
+
+def _clear_accelerate_offload_hooks(pipeline) -> None:
+    try:
+        if hasattr(pipeline, "maybe_free_model_hooks"):
+            pipeline.maybe_free_model_hooks()
+    except Exception:
+        pass
+    try:
+        remove_all_hooks = getattr(pipeline, "remove_all_hooks", None)
+        if callable(remove_all_hooks):
+            remove_all_hooks()
+    except Exception:
+        pass
+
+
+def _disable_granular_component_offload(pipeline, target_device: Optional[str] = None) -> None:
+    state = getattr(pipeline, "_zimage_granular_offload_state", None)
+    if not isinstance(state, dict):
+        pipeline._zimage_granular_offload_state = None
+        pipeline._zimage_granular_offload_enabled = False
+        return
+
+    managed = tuple(state.get("managed_components", ()))
+    if target_device is not None:
+        for name in managed:
+            module = getattr(pipeline, name, None)
+            if module is None or not hasattr(module, "to"):
+                continue
+            try:
+                module.to(target_device)
+            except Exception:
+                pass
+
+    pipeline._zimage_granular_offload_state = None
+    pipeline._zimage_granular_offload_enabled = False
+
+
+def _enable_granular_component_offload(pipeline, device: str, target_mode: str) -> bool:
+    if device != "cuda":
+        return False
+    if target_mode not in ("model_offload", "sequential_offload"):
+        return False
+    if not _zimage_granular_offload_enabled():
+        return False
+
+    managed = _collect_granular_offload_components(pipeline)
+    if not managed:
+        return False
+
+    _clear_accelerate_offload_hooks(pipeline)
+    if _pipeline_has_meta_tensors(pipeline):
+        print(
+            "[Z-Image POC] Granular offload unavailable for current pipeline (meta tensors after hook cleanup); "
+            "falling back to diffusers offload hooks."
+        )
+        return False
+
+    persistent = []
+    if target_mode == "model_offload" and "transformer" in managed:
+        # Keep denoiser warm on GPU in model_offload mode while parking large auxiliaries on CPU.
+        persistent.append("transformer")
+
+    try:
+        for name in managed:
+            module = getattr(pipeline, name, None)
+            if module is None:
+                continue
+            module.to("cpu")
+
+        for name in persistent:
+            module = getattr(pipeline, name, None)
+            if module is None:
+                continue
+            module.to(device)
+    except Exception:
+        _disable_granular_component_offload(pipeline, target_device="cpu")
+        raise
+
+    state = {
+        "device": device,
+        "mode": target_mode,
+        "managed_components": tuple(managed),
+        "persistent_components": tuple(persistent),
+        "current_gpu_components": tuple(persistent),
+        "last_stage": "init",
+    }
+    pipeline._zimage_granular_offload_state = state
+    pipeline._zimage_granular_offload_enabled = True
+
+    summaries = []
+    for name in managed:
+        module = getattr(pipeline, name, None)
+        if module is None:
+            continue
+        summaries.append(f"{name}={_module_memory_gb(module):.2f}GB")
+    persistent_text = ", ".join(persistent) if persistent else "none"
+    print(
+        f"[Z-Image POC] Enabled granular component offload ({target_mode}); "
+        f"persistent_gpu={persistent_text}; components: {', '.join(summaries)}."
+    )
+    return True
+
+
+def _activate_granular_component_set(pipeline, required_components: tuple[str, ...], stage: str) -> None:
+    state = getattr(pipeline, "_zimage_granular_offload_state", None)
+    if not isinstance(state, dict):
+        return
+
+    managed = tuple(state.get("managed_components", ()))
+    if not managed:
+        return
+
+    mode = str(state.get("mode", "model_offload"))
+    current = set(state.get("current_gpu_components", ()))
+    target = set(required_components)
+    if mode == "model_offload":
+        target.update(state.get("persistent_components", ()))
+    target.intersection_update(managed)
+
+    to_gpu = [name for name in managed if name in target and name not in current]
+    to_cpu = [name for name in managed if name not in target and name in current]
+
+    for name in to_gpu:
+        module = getattr(pipeline, name, None)
+        if module is None:
+            continue
+        module.to(state.get("device", "cuda"))
+    for name in to_cpu:
+        module = getattr(pipeline, name, None)
+        if module is None:
+            continue
+        module.to("cpu")
+
+    if to_cpu:
+        _cleanup_memory(cuda=True, aggressive=False)
+
+    state["current_gpu_components"] = tuple(name for name in managed if name in target)
+    state["last_stage"] = stage
+    if to_gpu or to_cpu:
+        print(
+            f"[Z-Image POC] Granular offload stage={stage}: +{to_gpu or ['none']} / -{to_cpu or ['none']}."
+        )
+
+
+def _prepare_granular_prompt_encode(pipeline, generator_device: str) -> None:
+    if generator_device != "cuda":
+        return
+    _activate_granular_component_set(
+        pipeline,
+        required_components=("text_encoder", "text_encoder_2"),
+        stage="prompt_encode",
+    )
+
+
+def _prepare_granular_pipeline_call(pipeline, generator_device: str, stage: str = "pipeline_call") -> None:
+    if generator_device != "cuda":
+        return
+    _activate_granular_component_set(
+        pipeline,
+        required_components=("transformer", "vae"),
+        stage=stage,
+    )
+
+
+def _park_granular_components(pipeline, generator_device: str, stage: str = "idle") -> None:
+    if generator_device != "cuda":
+        return
+    _activate_granular_component_set(pipeline, required_components=tuple(), stage=stage)
+
+
 def _estimate_generation_vram_need_gb(
     width: int,
     height: int,
@@ -2328,7 +2531,21 @@ def _apply_memory_mode(
         target_mode = _stricter_memory_mode(current_mode, target_mode)
 
     reason_suffix = f", reason={reason}" if reason else ""
+    if target_mode in ("model_offload", "sequential_offload") and device == "cuda":
+        try:
+            if _enable_granular_component_offload(pipeline, device=device, target_mode=target_mode):
+                pipeline._zimage_memory_mode = target_mode
+                used_offload = True
+                print(
+                    f"[Z-Image POC] Using granular {target_mode} "
+                    f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f}, profile={profile}{reason_suffix})."
+                )
+                return ("cuda" if device == "cuda" else "cpu"), used_offload
+        except Exception as e:
+            print(f"[Z-Image POC] Granular offload setup failed, falling back to diffusers offload hooks: {e}")
+
     if target_mode == "sequential_offload" and hasattr(pipeline, "enable_sequential_cpu_offload"):
+        _disable_granular_component_offload(pipeline, target_device="cpu")
         pipeline.enable_sequential_cpu_offload()
         pipeline._zimage_memory_mode = "sequential_offload"
         used_offload = True
@@ -2337,6 +2554,7 @@ def _apply_memory_mode(
             f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f}, profile={profile}{reason_suffix})."
         )
     elif target_mode in ("model_offload", "sequential_offload") and hasattr(pipeline, "enable_model_cpu_offload"):
+        _disable_granular_component_offload(pipeline, target_device="cpu")
         pipeline.enable_model_cpu_offload()
         pipeline._zimage_memory_mode = "model_offload"
         used_offload = True
@@ -2345,10 +2563,12 @@ def _apply_memory_mode(
             f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f}, profile={profile}{reason_suffix})."
         )
     else:
-        if current_mode in ("sequential_offload", "model_offload"):
+        if current_mode in ("sequential_offload", "model_offload") and not (allow_relax and target_mode == "full_gpu"):
             # Keep existing offload hooks instead of trying to force full-GPU.
             used_offload = True
         else:
+            _disable_granular_component_offload(pipeline, target_device=device)
+            _clear_accelerate_offload_hooks(pipeline)
             pipeline.to(device)
             pipeline._zimage_memory_mode = "full_gpu"
         print(
@@ -2759,6 +2979,7 @@ def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
             allow_relax=(forced_mode is not None),
         )
     else:
+        _disable_granular_component_offload(pipeline, target_device=device)
         pipeline.to(device)
 
     return ("cuda" if device == "cuda" else "cpu"), used_offload
@@ -4048,6 +4269,7 @@ def _maybe_prewarm_pipeline(
         )
 
         with torch.inference_mode():
+            _prepare_granular_prompt_encode(pipeline, generator_device=generator_device)
             pos, neg = pipeline.encode_prompt(
                 prompt=prompt,
                 negative_prompt=negative_prompt if use_cfg else None,
@@ -4060,6 +4282,7 @@ def _maybe_prewarm_pipeline(
                 [x.to(device=generator_device, dtype=pipeline.transformer.dtype) for x in neg] if neg else []
             )
             generator = torch.Generator(device=generator_device).manual_seed(1)
+            _prepare_granular_pipeline_call(pipeline, generator_device=generator_device, stage="prewarm_call")
             output = _run_pipeline_call(
                 pipeline,
                 dict(
@@ -4083,6 +4306,7 @@ def _maybe_prewarm_pipeline(
             del prompt_embeds
             del negative_prompt_embeds
             del generator
+            _park_granular_components(pipeline, generator_device=generator_device, stage="prewarm_idle")
 
         elapsed = time.perf_counter() - started
         print(f"[Z-Image POC] Prewarm complete in {elapsed:.2f}s.")
@@ -4095,6 +4319,7 @@ def _maybe_prewarm_pipeline(
                 pipeline.maybe_free_model_hooks()
         except Exception:
             pass
+        _park_granular_components(pipeline, generator_device=generator_device, stage="prewarm_final")
         if generator_device == "cuda":
             _cleanup_memory(cuda=True, aggressive=False)
 
@@ -4302,13 +4527,17 @@ def generate_zimage(
         else:
             negative_prompt_embeds = []
     else:
-        pos, neg = pipeline.encode_prompt(
-            prompt=prompt,
-            negative_prompt=negative_prompt if use_cfg else None,
-            do_classifier_free_guidance=use_cfg,
-            device=generator_device,
-            max_sequence_length=max_sequence_length,
-        )
+        _prepare_granular_prompt_encode(pipeline, generator_device=generator_device)
+        try:
+            pos, neg = pipeline.encode_prompt(
+                prompt=prompt,
+                negative_prompt=negative_prompt if use_cfg else None,
+                do_classifier_free_guidance=use_cfg,
+                device=generator_device,
+                max_sequence_length=max_sequence_length,
+            )
+        finally:
+            _park_granular_components(pipeline, generator_device=generator_device, stage="prompt_idle")
         cpu_pos = [x.detach().to("cpu", copy=True) for x in pos]
         cpu_neg = [x.detach().to("cpu", copy=True) for x in neg] if neg else []
         _put_prompt_cache(embed_cache_key, (cpu_pos, cpu_neg))
@@ -4364,6 +4593,11 @@ def generate_zimage(
         for attempt in range(max_attempts):
             generation_attempts = attempt + 1
             try:
+                _prepare_granular_pipeline_call(
+                    pipeline,
+                    generator_device=generator_device,
+                    stage=f"pipeline_call_{attempt + 1}",
+                )
                 output = _run_pipeline_call(pipeline, call_kwargs)
                 if _zimage_black_image_retry_enabled() and not black_retry_used:
                     try:
@@ -4451,6 +4685,11 @@ def generate_zimage(
                                     ]
                                 original_output = output
                                 try:
+                                    _prepare_granular_pipeline_call(
+                                        pipeline,
+                                        generator_device=generator_device,
+                                        stage="black_retry",
+                                    )
                                     output = _run_pipeline_call(pipeline, call_kwargs)
                                 except Exception as retry_error:
                                     output = original_output
@@ -4514,11 +4753,23 @@ def generate_zimage(
                 _cleanup_memory(cuda=True, aggressive=True)
                 pipeline._zimage_last_oom = True
 
-                if hasattr(pipeline, "enable_sequential_cpu_offload"):
-                    pipeline.enable_sequential_cpu_offload()
-                    pipeline._zimage_memory_mode = "sequential_offload"
-                    used_offload = True
+                try:
+                    oom_free_gb, oom_total_gb = _cuda_mem_info_gb()
+                    oom_pressure = (oom_free_gb / oom_total_gb) if oom_total_gb > 0 else 0.0
+                    generator_device, used_offload = _apply_memory_mode(
+                        pipeline=pipeline,
+                        device="cuda",
+                        target_mode="sequential_offload",
+                        total_vram_gb=oom_total_gb,
+                        free_vram_gb=oom_free_gb,
+                        pressure=oom_pressure,
+                        profile=profile,
+                        reason="oom retry",
+                        allow_relax=False,
+                    )
                     _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
+                except Exception as offload_error:
+                    print(f"[Z-Image POC] OOM retry could not switch offload mode: {offload_error}")
                 if hasattr(pipeline, "enable_attention_slicing"):
                     pipeline.enable_attention_slicing("max")
                 if hasattr(pipeline, "enable_vae_slicing"):
@@ -4573,6 +4824,7 @@ def generate_zimage(
         raise
     finally:
         cleanup_start = time.perf_counter()
+        _park_granular_components(pipeline, generator_device=generator_device, stage="final_idle")
         try:
             # Ensure accelerate offload hooks release device-resident weights between images.
             if hasattr(pipeline, "maybe_free_model_hooks"):
