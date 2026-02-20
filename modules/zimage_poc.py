@@ -308,6 +308,10 @@ def clear_runtime_caches(flush_cuda: bool = True, aggressive: bool = True) -> di
         pipeline = cached[0]
         released_pipelines += 1
         try:
+            _disable_granular_component_offload(pipeline, target_device="cpu")
+        except Exception:
+            pass
+        try:
             if hasattr(pipeline, "maybe_free_model_hooks"):
                 pipeline.maybe_free_model_hooks()
         except Exception:
@@ -732,6 +736,27 @@ def _zimage_forced_memory_mode() -> Optional[str]:
 
 def _zimage_granular_offload_enabled() -> bool:
     return _truthy_env("FOOOCUS_ZIMAGE_GRANULAR_OFFLOAD", "1")
+
+
+def _zimage_deep_patcher_enabled() -> bool:
+    return _truthy_env("FOOOCUS_ZIMAGE_DEEP_PATCHER", "1")
+
+
+def _zimage_deep_patcher_min_module_mb() -> float:
+    raw = os.environ.get("FOOOCUS_ZIMAGE_DEEP_PATCHER_MIN_MODULE_MB", "").strip()
+    if raw == "":
+        return 0.0
+    try:
+        value = float(raw)
+        if value < 0.0:
+            raise ValueError()
+        return min(value, 512.0)
+    except Exception:
+        _warn_once_env(
+            "FOOOCUS_ZIMAGE_DEEP_PATCHER_MIN_MODULE_MB",
+            f"[Z-Image POC] Ignoring invalid FOOOCUS_ZIMAGE_DEEP_PATCHER_MIN_MODULE_MB='{raw}'.",
+        )
+        return 0.0
 
 
 def _zimage_stage_timers_enabled() -> bool:
@@ -2317,6 +2342,227 @@ def _module_memory_gb(module) -> float:
     return float(total) / float(1024**3)
 
 
+def _module_direct_storage_bytes(module) -> int:
+    total = 0
+    try:
+        for tensor in module.parameters(recurse=False):
+            total += tensor.nelement() * tensor.element_size()
+    except Exception:
+        pass
+    try:
+        for tensor in module.buffers(recurse=False):
+            total += tensor.nelement() * tensor.element_size()
+    except Exception:
+        pass
+    return int(total)
+
+
+def _is_streamable_leaf_module(module) -> bool:
+    direct_bytes = _module_direct_storage_bytes(module)
+    if direct_bytes <= 0:
+        return False
+
+    try:
+        for name, _ in module.named_parameters(recurse=True):
+            if "." in name:
+                return False
+    except Exception:
+        pass
+    try:
+        for name, _ in module.named_buffers(recurse=True):
+            if "." in name:
+                return False
+    except Exception:
+        pass
+    return True
+
+
+def _module_current_device(module) -> Optional[str]:
+    try:
+        for tensor in module.parameters(recurse=False):
+            return str(tensor.device)
+    except Exception:
+        pass
+    try:
+        for tensor in module.buffers(recurse=False):
+            return str(tensor.device)
+    except Exception:
+        pass
+    return None
+
+
+def _move_streamable_module_to(module, target_device: str) -> bool:
+    current = _module_current_device(module)
+    if current is not None and str(current) == str(target_device):
+        return False
+    module.to(target_device)
+    return True
+
+
+def _collect_streamable_leaf_modules(component_name: str, component_module) -> list[tuple[str, object, int]]:
+    entries = []
+    if component_module is None:
+        return entries
+
+    min_bytes = int(max(0.0, _zimage_deep_patcher_min_module_mb()) * 1024 * 1024)
+    for sub_name, module in component_module.named_modules():
+        if not _is_streamable_leaf_module(module):
+            continue
+        storage_bytes = _module_direct_storage_bytes(module)
+        if storage_bytes < min_bytes:
+            continue
+        full_name = component_name if sub_name == "" else f"{component_name}.{sub_name}"
+        entries.append((full_name, module, storage_bytes))
+    entries.sort(key=lambda x: x[2], reverse=True)
+    return entries
+
+
+def _deep_patcher_stage(pipeline) -> Optional[str]:
+    state = getattr(pipeline, "_zimage_deep_patcher_state", None)
+    if not isinstance(state, dict):
+        return None
+    return str(state.get("stage", "active"))
+
+
+def _normalize_deep_patcher_stage(stage: str) -> str:
+    value = str(stage or "").strip().lower()
+    if "idle" in value:
+        return "idle"
+    return value or "active"
+
+
+def _set_deep_patcher_stage(pipeline, stage: str) -> None:
+    state = getattr(pipeline, "_zimage_deep_patcher_state", None)
+    if not isinstance(state, dict):
+        return
+    state["stage"] = _normalize_deep_patcher_stage(stage)
+
+
+def _disable_deep_patcher_offload(pipeline, target_device: Optional[str] = None) -> None:
+    state = getattr(pipeline, "_zimage_deep_patcher_state", None)
+    if not isinstance(state, dict):
+        pipeline._zimage_deep_patcher_state = None
+        pipeline._zimage_deep_patcher_enabled = False
+        return
+
+    hooks = list(state.get("hooks", ()))
+    for handle in hooks:
+        try:
+            handle.remove()
+        except Exception:
+            pass
+
+    active_map = state.get("active_gpu_modules", {})
+    if isinstance(active_map, dict):
+        modules = list(active_map.values())
+    else:
+        modules = []
+
+    if target_device is not None:
+        for module in modules:
+            try:
+                _move_streamable_module_to(module, target_device)
+            except Exception:
+                pass
+        for _, module, _ in state.get("module_entries", ()):
+            try:
+                _move_streamable_module_to(module, target_device)
+            except Exception:
+                pass
+
+    pipeline._zimage_deep_patcher_state = None
+    pipeline._zimage_deep_patcher_enabled = False
+
+
+def _enable_deep_patcher_offload(pipeline, device: str, target_mode: str) -> bool:
+    if device != "cuda":
+        return False
+    if target_mode != "sequential_offload":
+        return False
+    if not _zimage_deep_patcher_enabled():
+        return False
+
+    managed_components = _collect_granular_offload_components(pipeline)
+    if not managed_components:
+        return False
+
+    pipeline._zimage_granular_offload_state = None
+    pipeline._zimage_granular_offload_enabled = False
+    _disable_deep_patcher_offload(pipeline, target_device="cpu")
+    _clear_accelerate_offload_hooks(pipeline)
+    if _pipeline_has_meta_tensors(pipeline):
+        print(
+            "[Z-Image POC] Deep patcher unavailable for current pipeline (meta tensors after hook cleanup); "
+            "falling back to non-deep offload."
+        )
+        return False
+
+    module_entries = []
+    for component_name in managed_components:
+        component = getattr(pipeline, component_name, None)
+        module_entries.extend(_collect_streamable_leaf_modules(component_name, component))
+
+    if not module_entries:
+        print("[Z-Image POC] Deep patcher found no streamable leaf modules; falling back to non-deep offload.")
+        return False
+
+    state = {
+        "device": str(device),
+        "mode": str(target_mode),
+        "managed_components": tuple(managed_components),
+        "module_entries": tuple(module_entries),
+        "hooks": [],
+        "active_gpu_modules": {},
+        "stage": "idle",
+        "moves_to_gpu": 0,
+        "moves_to_cpu": 0,
+        "bytes_streamed": 0,
+    }
+
+    for _, module, _ in module_entries:
+        module.to("cpu")
+
+    def _pre_hook(module, _inputs):
+        deep_state = getattr(pipeline, "_zimage_deep_patcher_state", None)
+        if not isinstance(deep_state, dict):
+            return
+        if deep_state.get("stage", "active") == "idle":
+            return
+        module_id = id(module)
+        if module_id in deep_state["active_gpu_modules"]:
+            return
+        moved = _move_streamable_module_to(module, deep_state["device"])
+        if moved:
+            deep_state["moves_to_gpu"] += 1
+        deep_state["active_gpu_modules"][module_id] = module
+
+    def _post_hook(module, _inputs, _output):
+        deep_state = getattr(pipeline, "_zimage_deep_patcher_state", None)
+        if not isinstance(deep_state, dict):
+            return _output
+        module_id = id(module)
+        if module_id not in deep_state["active_gpu_modules"]:
+            return _output
+        moved = _move_streamable_module_to(module, "cpu")
+        if moved:
+            deep_state["moves_to_cpu"] += 1
+        deep_state["active_gpu_modules"].pop(module_id, None)
+        return _output
+
+    for _, module, _ in module_entries:
+        state["hooks"].append(module.register_forward_pre_hook(_pre_hook))
+        state["hooks"].append(module.register_forward_hook(_post_hook))
+
+    pipeline._zimage_deep_patcher_state = state
+    pipeline._zimage_deep_patcher_enabled = True
+    total_streamable_gb = sum(entry[2] for entry in module_entries) / float(1024**3)
+    print(
+        f"[Z-Image POC] Enabled deep patcher offload ({target_mode}); "
+        f"streamable_modules={len(module_entries)}, streamable_total={total_streamable_gb:.2f}GB."
+    )
+    return True
+
+
 def _collect_granular_offload_components(pipeline) -> list[str]:
     names = []
     for name in _ZIMAGE_GRANULAR_COMPONENT_NAMES:
@@ -2344,6 +2590,7 @@ def _clear_accelerate_offload_hooks(pipeline) -> None:
 
 
 def _disable_granular_component_offload(pipeline, target_device: Optional[str] = None) -> None:
+    _disable_deep_patcher_offload(pipeline, target_device=target_device)
     state = getattr(pipeline, "_zimage_granular_offload_state", None)
     if not isinstance(state, dict):
         pipeline._zimage_granular_offload_state = None
@@ -2377,6 +2624,7 @@ def _enable_granular_component_offload(pipeline, device: str, target_mode: str) 
     if not managed:
         return False
 
+    _disable_deep_patcher_offload(pipeline, target_device="cpu")
     _clear_accelerate_offload_hooks(pipeline)
     if _pipeline_has_meta_tensors(pipeline):
         print(
@@ -2475,6 +2723,9 @@ def _activate_granular_component_set(pipeline, required_components: tuple[str, .
 def _prepare_granular_prompt_encode(pipeline, generator_device: str) -> None:
     if generator_device != "cuda":
         return
+    if _deep_patcher_stage(pipeline) is not None:
+        _set_deep_patcher_stage(pipeline, "prompt_encode")
+        return
     _activate_granular_component_set(
         pipeline,
         required_components=("text_encoder", "text_encoder_2"),
@@ -2485,6 +2736,9 @@ def _prepare_granular_prompt_encode(pipeline, generator_device: str) -> None:
 def _prepare_granular_pipeline_call(pipeline, generator_device: str, stage: str = "pipeline_call") -> None:
     if generator_device != "cuda":
         return
+    if _deep_patcher_stage(pipeline) is not None:
+        _set_deep_patcher_stage(pipeline, stage)
+        return
     _activate_granular_component_set(
         pipeline,
         required_components=("transformer", "vae"),
@@ -2494,6 +2748,19 @@ def _prepare_granular_pipeline_call(pipeline, generator_device: str, stage: str 
 
 def _park_granular_components(pipeline, generator_device: str, stage: str = "idle") -> None:
     if generator_device != "cuda":
+        return
+    deep_state = getattr(pipeline, "_zimage_deep_patcher_state", None)
+    if isinstance(deep_state, dict):
+        deep_state["stage"] = _normalize_deep_patcher_stage(stage)
+        active_map = deep_state.get("active_gpu_modules", {})
+        if isinstance(active_map, dict) and active_map:
+            for module in list(active_map.values()):
+                try:
+                    _move_streamable_module_to(module, "cpu")
+                    deep_state["moves_to_cpu"] = int(deep_state.get("moves_to_cpu", 0)) + 1
+                except Exception:
+                    pass
+            active_map.clear()
         return
     _activate_granular_component_set(pipeline, required_components=tuple(), stage=stage)
 
@@ -2533,6 +2800,14 @@ def _apply_memory_mode(
     reason_suffix = f", reason={reason}" if reason else ""
     if target_mode in ("model_offload", "sequential_offload") and device == "cuda":
         try:
+            if _enable_deep_patcher_offload(pipeline, device=device, target_mode=target_mode):
+                pipeline._zimage_memory_mode = target_mode
+                used_offload = True
+                print(
+                    f"[Z-Image POC] Using deep patcher {target_mode} "
+                    f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, pressure={pressure:.2f}, profile={profile}{reason_suffix})."
+                )
+                return ("cuda" if device == "cuda" else "cpu"), used_offload
             if _enable_granular_component_offload(pipeline, device=device, target_mode=target_mode):
                 pipeline._zimage_memory_mode = target_mode
                 used_offload = True
@@ -4844,6 +5119,14 @@ def generate_zimage(
                 _cleanup_memory(cuda=True, aggressive=had_oom)
         else:
             _cleanup_memory(cuda=False, aggressive=had_oom)
+        deep_state = getattr(pipeline, "_zimage_deep_patcher_state", None)
+        if stage_timers and isinstance(deep_state, dict):
+            print(
+                "[Z-Image POC] Deep patcher stats: "
+                f"moves_to_gpu={int(deep_state.get('moves_to_gpu', 0))}, "
+                f"moves_to_cpu={int(deep_state.get('moves_to_cpu', 0))}, "
+                f"modules={len(deep_state.get('module_entries', ()))}."
+            )
         stage_times["cleanup"] = time.perf_counter() - cleanup_start
         if stage_timers:
             total_elapsed = time.perf_counter() - total_start
