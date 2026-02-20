@@ -551,7 +551,7 @@ def _zimage_fp16_quant_accum_mode() -> str:
 
 
 def _zimage_prewarm_enabled() -> bool:
-    return _truthy_env("FOOOCUS_ZIMAGE_PREWARM", "1")
+    return _truthy_env("FOOOCUS_ZIMAGE_PREWARM", "0")
 
 
 def _zimage_prewarm_steps() -> int:
@@ -795,6 +795,55 @@ def _zimage_vram_estimate_scale() -> float:
             f"[Z-Image POC] Ignoring invalid FOOOCUS_ZIMAGE_VRAM_ESTIMATE_SCALE='{raw}'.",
         )
         return 1.0
+
+
+def _system_ram_info_gb() -> tuple[float, float]:
+    # Returns (available_gb, total_gb). Best effort across environments.
+    try:
+        import psutil  # type: ignore
+
+        vm = psutil.virtual_memory()
+        return float(vm.available) / float(1024**3), float(vm.total) / float(1024**3)
+    except Exception:
+        pass
+
+    # Linux fallback without psutil.
+    if os.name == "posix":
+        try:
+            total_kb = None
+            avail_kb = None
+            with open("/proc/meminfo", "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        total_kb = int(line.split()[1])
+                    elif line.startswith("MemAvailable:"):
+                        avail_kb = int(line.split()[1])
+                    if total_kb is not None and avail_kb is not None:
+                        break
+            if total_kb is not None and avail_kb is not None:
+                return float(avail_kb) / float(1024**2), float(total_kb) / float(1024**2)
+        except Exception:
+            pass
+
+    return 0.0, 0.0
+
+
+def _zimage_system_ram_reserve_gb() -> float:
+    raw = os.environ.get("FOOOCUS_ZIMAGE_SYSTEM_RAM_RESERVE_GB", "").strip()
+    if raw == "":
+        # Conservative floor so offload doesn't drive desktop/system into swap thrash.
+        return 6.0
+    try:
+        value = float(raw)
+        if value < 0.0:
+            raise ValueError()
+        return min(value, 64.0)
+    except Exception:
+        _warn_once_env(
+            "FOOOCUS_ZIMAGE_SYSTEM_RAM_RESERVE_GB",
+            f"[Z-Image POC] Ignoring invalid FOOOCUS_ZIMAGE_SYSTEM_RAM_RESERVE_GB='{raw}'.",
+        )
+        return 6.0
 
 
 def _format_timing_ms(value: Optional[float]) -> str:
@@ -2341,6 +2390,9 @@ def _preflight_generation_memory_mode(
     headroom_gb = {"safe": 1.75, "balanced": 1.35, "speed": 0.95}.get(profile, 1.35)
     usable_free_gb = max(0.0, free_vram_gb - reserve_vram_gb)
     gap_gb = usable_free_gb - estimated_need_gb
+    host_available_gb, host_total_gb = _system_ram_info_gb()
+    host_reserve_gb = _zimage_system_ram_reserve_gb()
+    host_usable_gb = max(0.0, host_available_gb - host_reserve_gb)
 
     if forced_mode is None:
         if gap_gb < max(0.35, headroom_gb * 0.50):
@@ -2351,6 +2403,13 @@ def _preflight_generation_memory_mode(
             min_gap_for_model_offload = _zimage_model_offload_min_gap_gb()
             if gap_gb < min_gap_for_model_offload:
                 target_mode = "sequential_offload"
+        # Joint RAM+VRAM controller:
+        # If host RAM is tight, avoid the strictest offload mode when VRAM gap allows.
+        if host_available_gb > 0.0:
+            if target_mode == "sequential_offload" and host_usable_gb < 0.50 and gap_gb >= 0.70:
+                target_mode = "model_offload"
+            if target_mode == "model_offload" and host_usable_gb < 0.25 and gap_gb >= max(headroom_gb, 1.00):
+                target_mode = "full_gpu"
     else:
         target_mode = forced_mode
 
@@ -2411,6 +2470,11 @@ def _preflight_generation_memory_mode(
         f"gap={gap_gb:.2f}GB, base={base_mode}, "
         f"active={getattr(pipeline, '_zimage_memory_mode', 'unset')}{forced_suffix}."
     )
+    if host_available_gb > 0.0:
+        print(
+            f"[Z-Image POC] Host RAM budget: avail={host_available_gb:.2f}GB, total={host_total_gb:.2f}GB, "
+            f"reserve={host_reserve_gb:.2f}GB, usable={host_usable_gb:.2f}GB."
+        )
     return generator_device, used_offload
 
 
@@ -4129,6 +4193,27 @@ def generate_zimage(
             use_cfg=use_cfg,
             hard_cap=hard_cap,
         )
+
+    # RAM-aware max_seq tuning before preflight: keep quality as high as possible while
+    # reducing host-RAM pressure from aggressive offload modes.
+    host_available_gb, host_total_gb = _system_ram_info_gb()
+    host_reserve_gb = _zimage_system_ram_reserve_gb()
+    host_usable_gb = max(0.0, host_available_gb - host_reserve_gb)
+    if flavor == "turbo" and host_available_gb > 0.0:
+        ram_cap = None
+        if host_usable_gb < 0.25:
+            ram_cap = 128
+        elif host_usable_gb < 0.50:
+            ram_cap = 192
+        elif host_usable_gb < 0.75:
+            ram_cap = 256
+        if ram_cap is not None and max_sequence_length > ram_cap:
+            max_sequence_length = ram_cap
+            pipeline._zimage_forced_max_sequence_length = ram_cap
+            print(
+                f"[Z-Image POC] Host RAM pressure ({host_available_gb:.2f}GB free / {host_total_gb:.2f}GB total, "
+                f"reserve={host_reserve_gb:.2f}GB) -> using max_sequence_length={ram_cap}."
+            )
 
     if generator_device == "cuda" and allow_quality_fallback:
         free_gb, total_gb = _cuda_mem_info_gb()
