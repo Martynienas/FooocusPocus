@@ -83,6 +83,12 @@ class TestZImageAltPath(unittest.TestCase):
         with mock.patch.dict(os.environ, {"FOOOCUS_ZIMAGE_ALT_FORCE_FULL_GPU": "0"}, clear=False):
             self.assertFalse(zimage_poc._zimage_alt_force_full_gpu_enabled())
 
+    def test_alt_latent_source_defaults_to_gpu(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual("gpu", zimage_poc._zimage_alt_latent_source_mode())
+        with mock.patch.dict(os.environ, {"FOOOCUS_ZIMAGE_ALT_LATENT_SOURCE": "cpu"}, clear=False):
+            self.assertEqual("cpu", zimage_poc._zimage_alt_latent_source_mode())
+
     def test_alt_path_rejects_pipeline_without_latents_kwarg(self):
         pipeline = _DummyPipelineWithoutLatents()
         with self.assertRaisesRegex(RuntimeError, "latents support"):
@@ -90,27 +96,28 @@ class TestZImageAltPath(unittest.TestCase):
 
     def test_latents_are_deterministic_for_same_seeds(self):
         pipeline = _DummyPipelineWithLatents()
-        latents_a = zimage_poc._build_latents_from_seeds(
-            pipeline=pipeline,
-            seed_list=[101, 202],
-            width=832,
-            height=1216,
-            generator_device="cpu",
-        )
-        latents_b = zimage_poc._build_latents_from_seeds(
-            pipeline=pipeline,
-            seed_list=[101, 202],
-            width=832,
-            height=1216,
-            generator_device="cpu",
-        )
-        latents_c = zimage_poc._build_latents_from_seeds(
-            pipeline=pipeline,
-            seed_list=[303, 202],
-            width=832,
-            height=1216,
-            generator_device="cpu",
-        )
+        with mock.patch.dict(os.environ, {"FOOOCUS_ZIMAGE_ALT_LATENT_SOURCE": "cpu"}, clear=False):
+            latents_a = zimage_poc._build_latents_from_seeds(
+                pipeline=pipeline,
+                seed_list=[101, 202],
+                width=832,
+                height=1216,
+                generator_device="cpu",
+            )
+            latents_b = zimage_poc._build_latents_from_seeds(
+                pipeline=pipeline,
+                seed_list=[101, 202],
+                width=832,
+                height=1216,
+                generator_device="cpu",
+            )
+            latents_c = zimage_poc._build_latents_from_seeds(
+                pipeline=pipeline,
+                seed_list=[303, 202],
+                width=832,
+                height=1216,
+                generator_device="cpu",
+            )
         self.assertTrue(torch.equal(latents_a, latents_b))
         self.assertFalse(torch.equal(latents_a, latents_c))
 

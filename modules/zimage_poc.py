@@ -419,6 +419,15 @@ def _zimage_alt_force_full_gpu_enabled() -> bool:
     return _truthy_env("FOOOCUS_ZIMAGE_ALT_FORCE_FULL_GPU", "1")
 
 
+def _zimage_alt_latent_source_mode() -> str:
+    raw = os.environ.get("FOOOCUS_ZIMAGE_ALT_LATENT_SOURCE", "gpu").strip().lower()
+    if raw in ("gpu", "cuda"):
+        return "gpu"
+    if raw in ("cpu",):
+        return "cpu"
+    return "gpu"
+
+
 def zimage_active_backend_name() -> str:
     return "alternate" if _zimage_alt_path_enabled() else "legacy"
 
@@ -528,17 +537,26 @@ def _build_latents_from_seeds(
     else:
         sample_dtype = torch.float32
 
+    sample_device = str(generator_device)
+    if _zimage_alt_latent_source_mode() == "cpu":
+        sample_device = "cpu"
+    elif sample_device == "cuda" and not torch.cuda.is_available():
+        sample_device = "cpu"
+
     latents = []
     for value in seed_list:
-        generator = torch.Generator(device="cpu").manual_seed(int(value))
+        generator = torch.Generator(device=sample_device).manual_seed(int(value))
         latent = torch.randn(
             (1, channels, latent_h, latent_w),
             generator=generator,
-            device="cpu",
+            device=sample_device,
             dtype=sample_dtype,
         )
         latents.append(latent)
-    return torch.cat(latents, dim=0).to(device=generator_device, dtype=sample_dtype)
+    stacked = torch.cat(latents, dim=0)
+    if str(stacked.device) != str(generator_device) or stacked.dtype != sample_dtype:
+        stacked = stacked.to(device=generator_device, dtype=sample_dtype)
+    return stacked
 
 
 def _set_generation_random_source(
@@ -3373,6 +3391,9 @@ def _maybe_preemptive_cuda_cleanup_before_generation(pipeline, profile: str) -> 
     aggressive = _zimage_preemptive_cuda_cleanup_aggressive()
     if profile != "safe" and not aggressive:
         aggressive = False
+    alt_active = bool(getattr(pipeline, "_zimage_alt_path_active", False))
+    if alt_active and _zimage_alt_force_full_gpu_enabled() and mode == "full_gpu" and profile == "speed":
+        return
 
     free_before, total_gb = _cuda_mem_info_gb()
     try:
