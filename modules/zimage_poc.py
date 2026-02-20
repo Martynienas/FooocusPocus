@@ -4944,7 +4944,8 @@ def _generate_zimage_impl(
             width=width,
             height=height,
         )
-        for candidate in (generator_device, "cpu"):
+        # Keep alt-path latents on runtime device (Forge-like behavior).
+        for candidate in (generator_device,):
             if candidate not in alt_latents_device_candidates:
                 alt_latents_device_candidates.append(candidate)
     else:
@@ -5209,15 +5210,28 @@ def _generate_zimage_impl(
                     and "cpu" in msg
                 )
                 if _use_alt_path and device_mismatch and attempt < (max_attempts - 1):
-                    if alt_latents_device_candidates and (alt_latents_device_index + 1) < len(alt_latents_device_candidates):
-                        alt_latents_device_index += 1
-                        retry_latent_device = alt_latents_device_candidates[alt_latents_device_index]
-                        print(
-                            "[Z-Image POC] Alternate path device mismatch detected; "
-                            f"retrying with latents on {retry_latent_device}."
-                        )
-                        continue
-
+                    print(
+                        "[Z-Image POC] Alternate path device mismatch detected; "
+                        "resyncing tensors to runtime device and retrying."
+                    )
+                    alt_latents_device_candidates = [generator_device]
+                    alt_latents_device_index = 0
+                    call_kwargs["prompt_embeds"] = [
+                        x.to(device=generator_device, dtype=pipeline.transformer.dtype)
+                        for x in call_kwargs.get("prompt_embeds", [])
+                    ]
+                    call_kwargs["negative_prompt_embeds"] = [
+                        x.to(device=generator_device, dtype=pipeline.transformer.dtype)
+                        for x in call_kwargs.get("negative_prompt_embeds", [])
+                    ]
+                    _set_generation_random_source(
+                        call_kwargs=call_kwargs,
+                        seed_list=seed_list,
+                        pipeline=pipeline,
+                        generator_device=generator_device,
+                        use_alt_path=True,
+                        latents_device=generator_device,
+                    )
                     deep_state = getattr(pipeline, "_zimage_deep_patcher_state", None)
                     if isinstance(deep_state, dict):
                         print(
@@ -5246,20 +5260,34 @@ def _generate_zimage_impl(
                                 "[Z-Image POC] Failed to switch from deep patcher after alternate-path device mismatch: "
                                 f"{fallback_error}"
                             )
-                        alt_latents_device_candidates = []
-                        for candidate in (generator_device, "cpu"):
-                            if candidate not in alt_latents_device_candidates:
-                                alt_latents_device_candidates.append(candidate)
-                        alt_latents_device_index = 0
-                        call_kwargs["prompt_embeds"] = [
-                            x.to(device=generator_device, dtype=pipeline.transformer.dtype)
-                            for x in call_kwargs.get("prompt_embeds", [])
-                        ]
-                        call_kwargs["negative_prompt_embeds"] = [
-                            x.to(device=generator_device, dtype=pipeline.transformer.dtype)
-                            for x in call_kwargs.get("negative_prompt_embeds", [])
-                        ]
-                        continue
+                    else:
+                        current_mode = str(getattr(pipeline, "_zimage_memory_mode", "unset"))
+                        if current_mode in ("sequential_offload", "model_offload") and generator_device == "cuda":
+                            print(
+                                "[Z-Image POC] Alternate path device mismatch persisted in non-deep offload; "
+                                "retrying with full-GPU mode."
+                            )
+                            try:
+                                fallback_free_gb, fallback_total_gb = _cuda_mem_info_gb()
+                                fallback_pressure = (fallback_free_gb / fallback_total_gb) if fallback_total_gb > 0 else 0.0
+                                generator_device, used_offload = _apply_memory_mode(
+                                    pipeline=pipeline,
+                                    device="cuda",
+                                    target_mode="full_gpu",
+                                    total_vram_gb=fallback_total_gb,
+                                    free_vram_gb=fallback_free_gb,
+                                    pressure=fallback_pressure,
+                                    profile=profile,
+                                    reason="alternate path device mismatch",
+                                    allow_relax=True,
+                                )
+                                _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
+                            except Exception as fallback_error:
+                                print(
+                                    "[Z-Image POC] Failed to switch to full-GPU after alternate-path device mismatch: "
+                                    f"{fallback_error}"
+                                )
+                    continue
 
                 deep_generator_mismatch = (
                     "cannot generate a cpu tensor from a generator of type cuda" in msg
