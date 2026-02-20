@@ -89,6 +89,16 @@ class TestZImageAltPath(unittest.TestCase):
         with mock.patch.dict(os.environ, {"FOOOCUS_ZIMAGE_ALT_LATENT_SOURCE": "cpu"}, clear=False):
             self.assertEqual("cpu", zimage_poc._zimage_alt_latent_source_mode())
 
+    def test_flash_backend_candidates_prioritize_flash(self):
+        candidates = zimage_poc._zimage_attention_backend_candidates("flash", allow_xformers=True)
+        self.assertGreaterEqual(len(candidates), 1)
+        self.assertEqual("flash", candidates[0])
+
+    def test_auto_backend_candidates_prioritize_flash(self):
+        candidates = zimage_poc._zimage_attention_backend_candidates("auto", allow_xformers=True)
+        self.assertGreaterEqual(len(candidates), 1)
+        self.assertEqual("flash", candidates[0])
+
     def test_alt_path_rejects_pipeline_without_latents_kwarg(self):
         pipeline = _DummyPipelineWithoutLatents()
         with self.assertRaisesRegex(RuntimeError, "latents support"):

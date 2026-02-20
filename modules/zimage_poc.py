@@ -1092,12 +1092,12 @@ def _zimage_attention_backend_candidates(mode: str, allow_xformers: bool = True)
     if mode == "sdpa":
         return ["flash_attention_2", "flash_attention", "sdpa", "native"]
     if mode == "flash":
-        return ["flash_attention_2", "flash_attention", "flash", "sdpa", "native"]
+        return ["flash", "flash_attention_2", "flash_attention", "sdpa", "native"]
     if mode == "xformers":
         return ["xformers", "native"]
 
     # auto
-    candidates = ["flash_attention_2", "flash_attention", "flash", "sdpa"]
+    candidates = ["flash", "flash_attention_2", "flash_attention", "sdpa"]
     if allow_xformers:
         candidates.append("xformers")
     candidates.append("native")
