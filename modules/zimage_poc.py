@@ -2481,6 +2481,8 @@ def _enable_deep_patcher_offload(pipeline, device: str, target_mode: str) -> boo
         return False
     if not _zimage_deep_patcher_enabled():
         return False
+    if bool(getattr(pipeline, "_zimage_deep_patcher_blocked", False)):
+        return False
 
     managed_components = _collect_granular_offload_components(pipeline)
     if not managed_components:
@@ -5002,6 +5004,54 @@ def generate_zimage(
                 break
             except RuntimeError as e:
                 msg = str(e).lower()
+                deep_generator_mismatch = (
+                    "cannot generate a cpu tensor from a generator of type cuda" in msg
+                    or ("generator of type cuda" in msg and "cpu tensor" in msg)
+                )
+                if deep_generator_mismatch and generator_device == "cuda":
+                    deep_state = getattr(pipeline, "_zimage_deep_patcher_state", None)
+                    if isinstance(deep_state, dict) and attempt < (max_attempts - 1):
+                        print(
+                            "[Z-Image POC] Deep patcher runtime generator/device mismatch detected; "
+                            "disabling deep patcher for this pipeline and retrying with non-deep offload."
+                        )
+                        pipeline._zimage_deep_patcher_blocked = True
+                        _disable_deep_patcher_offload(pipeline, target_device="cpu")
+                        try:
+                            fallback_free_gb, fallback_total_gb = _cuda_mem_info_gb()
+                            fallback_pressure = (fallback_free_gb / fallback_total_gb) if fallback_total_gb > 0 else 0.0
+                            generator_device, used_offload = _apply_memory_mode(
+                                pipeline=pipeline,
+                                device="cuda",
+                                target_mode="model_offload",
+                                total_vram_gb=fallback_total_gb,
+                                free_vram_gb=fallback_free_gb,
+                                pressure=fallback_pressure,
+                                profile=profile,
+                                reason="deep patcher generator mismatch",
+                                allow_relax=True,
+                            )
+                            _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
+                        except Exception as fallback_error:
+                            print(
+                                "[Z-Image POC] Failed to switch from deep patcher after generator mismatch: "
+                                f"{fallback_error}"
+                            )
+                        if len(seed_list) <= 1:
+                            call_kwargs["generator"] = torch.Generator(device=generator_device).manual_seed(seed_list[0])
+                        else:
+                            call_kwargs["generator"] = [
+                                torch.Generator(device=generator_device).manual_seed(s) for s in seed_list
+                            ]
+                        call_kwargs["prompt_embeds"] = [
+                            x.to(device=generator_device, dtype=pipeline.transformer.dtype)
+                            for x in call_kwargs.get("prompt_embeds", [])
+                        ]
+                        call_kwargs["negative_prompt_embeds"] = [
+                            x.to(device=generator_device, dtype=pipeline.transformer.dtype)
+                            for x in call_kwargs.get("negative_prompt_embeds", [])
+                        ]
+                        continue
 
                 xformers_mismatch = (
                     "xformersattnprocessor" in msg
