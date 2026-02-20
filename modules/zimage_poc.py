@@ -551,7 +551,7 @@ def _zimage_fp16_quant_accum_mode() -> str:
 
 
 def _zimage_prewarm_enabled() -> bool:
-    return _truthy_env("FOOOCUS_ZIMAGE_PREWARM", "0")
+    return _truthy_env("FOOOCUS_ZIMAGE_PREWARM", "1")
 
 
 def _zimage_prewarm_steps() -> int:
@@ -3779,7 +3779,6 @@ def _load_pipeline(
             device, _ = _pick_device_and_dtype()
             generator_device, used_offload = _prepare_pipeline_memory_mode(pipeline, device)
             _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
-        _maybe_prewarm_pipeline(pipeline, generator_device=generator_device, flavor=flavor)
         # Keep cached memory mode for throughput; mode hardening is handled at load/OOM time.
         return _PIPELINE_CACHE[cache_key]
 
@@ -3913,7 +3912,6 @@ def _load_pipeline(
 
     pipeline.set_progress_bar_config(disable=True)
     generator_device, used_offload = _prepare_pipeline_memory_mode(pipeline, device)
-    _maybe_prewarm_pipeline(pipeline, generator_device=generator_device, flavor=flavor)
     _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
     return _PIPELINE_CACHE[cache_key]
 
@@ -3940,7 +3938,14 @@ def _run_pipeline_call(pipeline, call_kwargs: dict):
                 raise
 
 
-def _maybe_prewarm_pipeline(pipeline, generator_device: str, flavor: str) -> None:
+def _maybe_prewarm_pipeline(
+    pipeline,
+    generator_device: str,
+    flavor: str,
+    prewarm_width: Optional[int] = None,
+    prewarm_height: Optional[int] = None,
+    prewarm_max_sequence_length: Optional[int] = None,
+) -> None:
     if not _zimage_prewarm_enabled():
         return
     if bool(getattr(pipeline, "_zimage_prewarm_done", False)):
@@ -3954,8 +3959,15 @@ def _maybe_prewarm_pipeline(pipeline, generator_device: str, flavor: str) -> Non
 
     try:
         steps = _zimage_prewarm_steps()
-        width, height = _zimage_prewarm_size()
-        max_sequence_length = 64 if flavor == "turbo" else 128
+        width, height = _zimage_prewarm_size(
+            default_width=max(256, int(prewarm_width)) if prewarm_width is not None else 832,
+            default_height=max(256, int(prewarm_height)) if prewarm_height is not None else 1216,
+        )
+        default_max_seq = 64 if flavor == "turbo" else 128
+        if prewarm_max_sequence_length is None:
+            max_sequence_length = default_max_seq
+        else:
+            max_sequence_length = max(32, int(prewarm_max_sequence_length))
         prompt = os.environ.get("FOOOCUS_ZIMAGE_PREWARM_PROMPT", "").strip() or "portrait photo"
         negative_prompt = os.environ.get("FOOOCUS_ZIMAGE_PREWARM_NEGATIVE_PROMPT", "").strip()
         guidance = 1.0
@@ -4134,6 +4146,15 @@ def generate_zimage(
                 f"[Z-Image POC] Very low free VRAM before generation ({free_gb:.2f}GB/{total_gb:.2f}GB), "
                 "using max_sequence_length=160."
             )
+
+    _maybe_prewarm_pipeline(
+        pipeline,
+        generator_device=generator_device,
+        flavor=flavor,
+        prewarm_width=width,
+        prewarm_height=height,
+        prewarm_max_sequence_length=max_sequence_length,
+    )
 
     if generator_device == "cuda":
         _maybe_preemptive_cuda_cleanup_before_generation(pipeline, profile=profile)
