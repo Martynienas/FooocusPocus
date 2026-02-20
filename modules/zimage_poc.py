@@ -4153,7 +4153,7 @@ def generate_zimage(
         flavor=flavor,
         prewarm_width=width,
         prewarm_height=height,
-        prewarm_max_sequence_length=max_sequence_length,
+        prewarm_max_sequence_length=min(max_sequence_length, 128 if flavor == "turbo" else 192),
     )
 
     if generator_device == "cuda":
