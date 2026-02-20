@@ -77,6 +77,12 @@ class TestZImageAltPath(unittest.TestCase):
         alt_mock.assert_called_once()
         legacy_mock.assert_not_called()
 
+    def test_alt_force_full_gpu_default_is_enabled(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(zimage_poc._zimage_alt_force_full_gpu_enabled())
+        with mock.patch.dict(os.environ, {"FOOOCUS_ZIMAGE_ALT_FORCE_FULL_GPU": "0"}, clear=False):
+            self.assertFalse(zimage_poc._zimage_alt_force_full_gpu_enabled())
+
     def test_alt_path_rejects_pipeline_without_latents_kwarg(self):
         pipeline = _DummyPipelineWithoutLatents()
         with self.assertRaisesRegex(RuntimeError, "latents support"):

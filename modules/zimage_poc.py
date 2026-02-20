@@ -415,6 +415,10 @@ def _zimage_alt_path_enabled() -> bool:
     return _truthy_env("FOOOCUS_ZIMAGE_ALT_PATH", "1")
 
 
+def _zimage_alt_force_full_gpu_enabled() -> bool:
+    return _truthy_env("FOOOCUS_ZIMAGE_ALT_FORCE_FULL_GPU", "1")
+
+
 def zimage_active_backend_name() -> str:
     return "alternate" if _zimage_alt_path_enabled() else "legacy"
 
@@ -3030,6 +3034,33 @@ def _preflight_generation_memory_mode(
     if device != "cuda" or generator_device != "cuda":
         return generator_device, used_offload
 
+    alt_active = bool(getattr(pipeline, "_zimage_alt_path_active", False))
+    if alt_active and _zimage_alt_force_full_gpu_enabled():
+        _, total_vram_gb, free_vram_gb, pressure = _choose_memory_mode(device, profile=profile)
+        try:
+            generator_device, used_offload = _apply_memory_mode(
+                pipeline=pipeline,
+                device=device,
+                target_mode="full_gpu",
+                total_vram_gb=total_vram_gb,
+                free_vram_gb=free_vram_gb,
+                pressure=pressure,
+                profile=profile,
+                reason="alt path force full_gpu",
+                allow_relax=True,
+            )
+            _PIPELINE_CACHE[cache_key] = (pipeline, generator_device, used_offload)
+            print(
+                "[Z-Image POC] Alt path forced full-GPU memory mode for device consistency "
+                f"(total={total_vram_gb:.2f}GB, free={free_vram_gb:.2f}GB, profile={profile})."
+            )
+        except Exception as e:
+            print(
+                "[Z-Image POC] Warning: failed to force full-GPU mode for alt path; "
+                f"continuing with adaptive preflight ({e})."
+            )
+        return generator_device, used_offload
+
     base_mode, total_vram_gb, free_vram_gb, pressure = _choose_memory_mode(device, profile=profile)
     target_mode = base_mode
     forced_mode = _zimage_forced_memory_mode()
@@ -4809,6 +4840,7 @@ def _generate_zimage_impl(
         text_encoder_override=resolved_text_encoder_override,
         vae_override=resolved_vae_override,
     )
+    pipeline._zimage_alt_path_active = bool(_use_alt_path)
     if generator_device == "cuda" and _should_cleanup_cuda_cache(profile, had_oom=False, pipeline=pipeline):
         _cleanup_memory(cuda=True, aggressive=False)
     stage_times["pipeline_load"] = time.perf_counter() - stage_start
