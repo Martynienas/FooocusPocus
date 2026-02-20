@@ -3036,6 +3036,9 @@ def _preflight_generation_memory_mode(
 
     alt_active = bool(getattr(pipeline, "_zimage_alt_path_active", False))
     if alt_active and _zimage_alt_force_full_gpu_enabled():
+        current_mode = str(getattr(pipeline, "_zimage_memory_mode", "unset"))
+        if current_mode == "full_gpu":
+            return generator_device, used_offload
         _, total_vram_gb, free_vram_gb, pressure = _choose_memory_mode(device, profile=profile)
         try:
             generator_device, used_offload = _apply_memory_mode(
@@ -3429,8 +3432,14 @@ def _prepare_pipeline_memory_mode(pipeline, device: str) -> tuple[str, bool]:
                 except Exception:
                     pass
 
-        target_mode, total_vram_gb, free_vram_gb, pressure = _choose_memory_mode(device, profile=profile)
-        reason = ""
+        alt_active = bool(getattr(pipeline, "_zimage_alt_path_active", False))
+        if alt_active and _zimage_alt_force_full_gpu_enabled():
+            target_mode = "full_gpu"
+            _, total_vram_gb, free_vram_gb, pressure = _choose_memory_mode(device, profile=profile)
+            reason = "alt path force full_gpu"
+        else:
+            target_mode, total_vram_gb, free_vram_gb, pressure = _choose_memory_mode(device, profile=profile)
+            reason = ""
         if forced_mode is not None:
             reason = f"forced by env FOOOCUS_ZIMAGE_FORCE_MEMORY_MODE={forced_mode}"
         _, used_offload = _apply_memory_mode(
@@ -4504,6 +4513,7 @@ def _load_pipeline(
     checkpoint_folders: list[str],
     text_encoder_override: Optional[str] = None,
     vae_override: Optional[str] = None,
+    alt_path_active: bool = False,
 ):
     cache_key = _pipeline_cache_key(
         source_kind,
@@ -4523,7 +4533,9 @@ def _load_pipeline(
                 checkpoint_folders,
                 text_encoder_override=text_encoder_override,
                 vae_override=vae_override,
+                alt_path_active=alt_path_active,
             )
+        pipeline._zimage_alt_path_active = bool(alt_path_active)
         current_profile = _zimage_perf_profile()
         cached_profile = getattr(pipeline, "_zimage_perf_profile", "safe")
         if current_profile != cached_profile:
@@ -4655,6 +4667,8 @@ def _load_pipeline(
 
     if _pipeline_has_meta_tensors(pipeline):
         raise RuntimeError("Z-Image pipeline contains meta tensors after load.")
+
+    pipeline._zimage_alt_path_active = bool(alt_path_active)
 
     if text_encoder_override is not None:
         _load_component_override(pipeline, "text_encoder", text_encoder_override, dtype)
@@ -4839,8 +4853,8 @@ def _generate_zimage_impl(
         checkpoint_folders,
         text_encoder_override=resolved_text_encoder_override,
         vae_override=resolved_vae_override,
+        alt_path_active=bool(_use_alt_path),
     )
-    pipeline._zimage_alt_path_active = bool(_use_alt_path)
     if generator_device == "cuda" and _should_cleanup_cuda_cache(profile, had_oom=False, pipeline=pipeline):
         _cleanup_memory(cuda=True, aggressive=False)
     stage_times["pipeline_load"] = time.perf_counter() - stage_start
