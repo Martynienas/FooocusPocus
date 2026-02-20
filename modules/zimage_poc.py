@@ -5049,6 +5049,12 @@ def _generate_zimage_impl(
                         retry_sizes.append(pair)
 
         max_attempts = 4 if (flavor == "turbo" and allow_quality_fallback) else (2 if flavor == "turbo" else 3)
+        # Alternate path may need extra retries to walk:
+        # 1) latents on runtime device
+        # 2) latents on CPU
+        # 3) deep patcher disabled + non-deep offload
+        if _use_alt_path:
+            max_attempts = max(max_attempts, 4)
         for attempt in range(max_attempts):
             generation_attempts = attempt + 1
             try:
