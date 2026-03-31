@@ -34,8 +34,20 @@ def remove_pattern(x, pattern):
     return x
 
 
+class DisabledFooocusExpansion:
+    def __init__(self, reason: str):
+        self.available = False
+        self.reason = safe_str(reason)
+        self.patcher = None
+        print(f'Fooocus Expansion disabled: {self.reason}')
+
+    def __call__(self, prompt, seed):
+        return ''
+
+
 class FooocusExpansion:
     def __init__(self):
+        self.available = True
         self.tokenizer = AutoTokenizer.from_pretrained(path_fooocus_expansion)
 
         positive_words = open(os.path.join(path_fooocus_expansion, 'positive.txt'),

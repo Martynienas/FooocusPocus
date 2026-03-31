@@ -7,6 +7,7 @@ import args_manager
 import tempfile
 import modules.flags
 import modules.sdxl_styles
+import modules.zimage_poc
 
 from modules.model_loader import load_file_from_url
 from modules.extra_utils import makedirs_with_log, get_files_from_folder, try_eval_env_var
@@ -830,6 +831,8 @@ def get_model_filenames(folder_paths, extensions=None, name_filter=None):
 def update_files():
     global model_filenames, lora_filenames, vae_filenames, wildcard_filenames, available_presets
     model_filenames = get_model_filenames(paths_checkpoints)
+    model_filenames += modules.zimage_poc.list_zimage_model_entries(paths_checkpoints)
+    model_filenames = sorted(set(model_filenames), key=str.casefold)
     lora_filenames = get_model_filenames(paths_loras)
     vae_filenames = get_model_filenames(path_vae)
     wildcard_filenames = get_files_from_folder(path_wildcards, ['.txt'])
